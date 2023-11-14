@@ -38,6 +38,7 @@ TEST_F(Vec3Test, ConstructionTest) {
 TEST_F(Vec3Test, DotTest) {
 
   EXPECT_THAT(v1.dot(v2), FloatEq((x1 * x2) + (y1 * y2) + (z1 * z2)));
+  EXPECT_THAT(vec3(1, 3, 8).dot(vec3(5, 3.3, 2)), FloatEq(30.9));
 }
 
 TEST_F(Vec3Test, PlusTest) {
