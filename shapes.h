@@ -1,6 +1,10 @@
 #include "vec3.h"
 #include "ray.h"
 #include "color.h"
+#include <Eigen/Core>
+#include <Eigen/LU>
+
+typedef Eigen::Matrix<float, 4, 4> Matrix4;
 
 class Shape;
 
@@ -40,6 +44,8 @@ class LightSource {
 };
 
 class Shape {
+    protected:
+        Matrix4 transform;
     public:
         Material material;
         __device__ virtual bool intersects(ray& r) = 0;
@@ -85,13 +91,84 @@ class Plane : public Shape {
         }
 };
 
+class Cube : public Shape {
+    private:
+        Material material;
+        float xMin;
+        float xMax;
+        float yMin;
+        float yMax;
+        float zMin;
+        float zMax;
+    public:
+        __device__ Cube(vec3 cornerLeft, vec3 cornerRight, Material material) : material(material) {
+            this->xMin = min(cornerLeft.x(), cornerRight.x());
+            this->yMin = min(cornerLeft.y(), cornerRight.y());
+            this->zMin = min(cornerLeft.z(), cornerRight.z());
+            this->xMax = max(cornerLeft.x(), cornerRight.x());
+            this->yMax = max(cornerLeft.y(), cornerRight.y());
+            this->zMax = max(cornerLeft.z(), cornerRight.z());
+        }
+
+        __device__ vec3 getNormal(vec3 position) {
+            vec3 vMax = vec3(this->xMax, this->yMax, this->zMax);
+            vec3 vMin = vec3(this->xMin, this->yMin, this->zMin);
+            vec3 center = (vMax + vMin) * (0.5f);
+            vec3 res = position - center;
+            return res.normalized();
+        }
+
+        __device__ Material getMaterial(vec3 position) {
+            return this->material;
+        }
+
+        __device__ bool intersects(ray& r) {
+            float tx1 = (xMin - r.origin()[0]) / r.direction()[0];
+            float tx2 = (xMax - r.origin()[0]) / r.direction()[0];
+            float ty1 = (yMin - r.origin()[1]) / r.direction()[1];
+            float ty2 = (yMax - r.origin()[1]) / r.direction()[1];
+            float tz1 = (zMin - r.origin()[2]) / r.direction()[2];
+            float tz2 = (zMax - r.origin()[2]) / r.direction()[2];
+
+            float tNear = max(min(tx1, tx2), max(min(ty1, ty2), min(tz1, tz2)));
+            float tFar = min(max(tx1, tx2), min(max(ty1, ty2), max(tz1, tz2)));
+            
+            return !(tNear > tFar || tFar < 0);
+        }
+
+        __device__ IntersectionPoint getIntersection(ray& r) {
+            float tx1 = (xMin - r.origin()[0]) / r.direction()[0];
+            float tx2 = (xMax - r.origin()[0]) / r.direction()[0];
+            float ty1 = (yMin - r.origin()[1]) / r.direction()[1];
+            float ty2 = (yMax - r.origin()[1]) / r.direction()[1];
+            float tz1 = (zMin - r.origin()[2]) / r.direction()[2];
+            float tz2 = (zMax - r.origin()[2]) / r.direction()[2];
+
+            float tNear = max(min(tx1, tx2), max(min(ty1, ty2), min(tz1, tz2)));
+            float tFar = min(max(tx1, tx2), min(max(ty1, ty2), max(tz1, tz2)));
+
+            // printf("Near: %9.6f, Far: %9.6f\n", tNear, tFar);
+
+            IntersectionPoint res;
+            res.intersects = false;
+
+            if (!(tNear > tFar || tFar < 0)) {
+                res.intersects = true;
+                res.distance = tNear;
+                res.position = r.at(tNear);
+                res.material = this->getMaterial(res.position);
+                res.normal = this->getNormal(res.position);
+            }
+            return res;
+        }
+};
 
 class Sphere : public Shape {
     private:
         vec3 c;
         float r;
     public:
-        __device__ Sphere(vec3 center, float radius, Material material) : c(center), r(radius) {this->material = material;}
+        __device__ Sphere(Material material, Matrix4 transform = Matrix4::Identity(4, 4)) {this->transform = transform; this->material = material;}
         __device__ vec3& center() {
             return this->c;
         }
@@ -105,7 +182,7 @@ class Sphere : public Shape {
         }
 
         __device__ vec3 getNormal(vec3 position) {
-            return (position - (this->c)).normalize();
+            return (position - (this->c)).normalized();
         }
 
         __device__ bool intersects(ray& r) {
@@ -119,21 +196,31 @@ class Sphere : public Shape {
         }
 
         __device__ IntersectionPoint getIntersection(ray& r) {
-            vec3 toOrigin = r.origin() - this->c;
-            float a = r.direction().dot(r.direction());
-            float b = 2.0f*(r.direction().dot(toOrigin));
-            float c = (toOrigin).dot(toOrigin) - (this->r * this->r);
+            vec3 localOrigin = vec423(this->transform.inverse() * vec324(r.origin()));
+            vec3 localDirection = vec423(this->transform.inverse() * vec324(r.direction()));
+            // printf("Direction dot product: %9.6f\n", localDirection.dot(r.direction())/(localDirection.norm() * r.direction().norm()));
+            // printf("LocalOrigin: %9.6f %9.6f %9.6f\n", localOrigin[0], localOrigin[1], localOrigin[2]);
+            //printf("LocalDirection: %9.6f %9.6f %9.6f\n", localDirection[0], localDirection[1], localDirection[2]);
+            ray localRay = ray(localOrigin, localDirection);
+            vec3 toOrigin = localRay.origin() - vec3(0, 0, -4);
+            float a = localRay.direction().dot(localRay.direction());
+            float b = 2.0f*(localRay.direction().dot(toOrigin));
+            float c = (toOrigin).dot(toOrigin) - 1;
             float discriminant = b*b - 4*a*c;
             IntersectionPoint res;
             res.intersects = false;
+            // printf("Discriminant: %9.6f\n", discriminant);
             if (discriminant >= 0) {
-                float d = (-b - sqrt(discriminant) ) / (2.0*a);
-                vec3 pos = r.at(d);
                 res.intersects = true;
+                float d = (-b - sqrt(discriminant) ) / (2.0*a);
+                vec3 pos = localRay.at(d);
+                res.position = vec423(this->transform * vec324(pos));
+                
                 res.material = this->getMaterial(pos);
-                res.position = pos;
+                
+                // printf("Position: %9.6f %9.6f %9.6f\n", res.position[0], res.position[1], res.position[2]);
                 res.distance = d;
-                res.normal = this->getNormal(r.origin() + r.direction() * res.distance);
+                res.normal = vec423(this->transform * vec324(this->getNormal(localRay.at(res.distance))));
             }
             return res;
         }

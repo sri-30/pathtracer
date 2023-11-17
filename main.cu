@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <iostream>
+#include <Eigen/Core>
 
-#include "vec3.h"
+//#include "vec3.h"
 #include "color.h"
 #include "shapes.h"
 #include "util.h"
@@ -72,7 +73,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     color3 p_color(0, 0, 0);
     int n_origin;
     for (int i = 0; i < n_samples; i++) {
-        ray r = ray(camera_pos, direction.normalize());
+        ray r = ray(camera_pos, (vec3) direction.normalized());
         for (int j = 0; j < n_bounces; j++) {
             IntersectionPoint min_p;
             min_p.intersects = false;
@@ -80,74 +81,82 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
                 Shape *obj = scene[k];
                 IntersectionPoint p = obj->getIntersection(r);
                 if (p.intersects) {
+                    p_color = color3(1, 0, 0);
                     if (!min_p.intersects) {
                         min_p = p;
                     } else {
-                        if (r.at(p.distance).z() < r.at(min_p.distance).z()) {
+                        if (p.position.z() < min_p.position.z()) {
                             min_p = p;
                             n_origin = k;
                         }
                     }
                 }
             }
-            if (!min_p.intersects) {
-                break;
-            }
-            vec3 hitpoint = r.at(min_p.distance);
-            for (int k = 0; k < n_lights; k++) {
-                LightSource *l = lights[k];
-
-                vec3 P = min_p.position;
-                vec3 N = min_p.normal;
-                vec3 O = r.origin();
-                vec3 L = ((l->position) - P).normalize();
-                vec3 V = (config.camera_pos - P).normalize();
-
-                // if (N.normalize().dot(L) < 0)
-                //     N = N * -1;
-
-                float I = l->getIntensity((l->position - P).magnitude());
-
-                bool shadow = false;
-                float distanceToLight = (l->position - P).magnitude();
-                ray shadowRay = ray(l->position, P);
-
-                for (int x = 0; x < n_objects; x++) {
-                    IntersectionPoint p_ = scene[x]->getIntersection(shadowRay);
-                    float intersection_distance = (p_.position - l->position).magnitude();
-                    if (x != n_origin && p_.intersects && intersection_distance < distanceToLight) {
-                        shadow = true;
-                        break;
-                    }
-                }
-
-                if (shadow)
-                    continue;
-
-                // printf("Intensity: %9.6f, Diffuse term: %9.6f\n", I, max(0.0, N.normalize().dot(L)));
-
-                color3 diffuse = (min_p.material.color_reflection) * (I) * (max(0.0, N.normalize().dot(L)));
-
-                vec3 R = L.reflect(N).normalize();
-                color3 specular = l->emission_color * I * pow(max(0.0, R.dot(V)), 2);
-                //printf("Magnitude: %9.6f\n", diffuse.magnitude());
-                // if (specular.magnitude() > 0.1)
-                // printf("Specular: %9.6f, Specular Vector: %9.6f\n", specular.magnitude(), -1R.dot(V));
-                p_color = p_color + diffuse * 0.8 + specular * 0.8;
-            }
-            p_color = p_color +  min_p.material.color_reflection * 0.4;
         }
-        // if (p_color.magnitude() > 0) {
+    }
+        //     if (!min_p.intersects) {
+        //         break;
+        //     }
+        //     vec3 hitpoint = r.at(min_p.distance);
+        //     for (int k = 0; k < n_lights; k++) {
+        //         LightSource *l = lights[k];
+
+        //         vec3 P = min_p.position;
+        //         vec3 N = min_p.normal;
+        //         vec3 O = r.origin();
+        //         vec3 L = ((l->position) - P).normalized();
+        //         vec3 V = (config.camera_pos - P).normalized();
+
+        //         // if (N.normalized().dot(L) < 0)
+        //         //     N = N * -1;
+
+        //         float I = l->getIntensity((l->position - P).norm());
+
+        //         bool shadow = false;
+        //         float distanceToLight = (l->position - P).norm();
+        //         ray shadowRay = ray(l->position, P);
+
+        //         for (int x = 0; x < n_objects; x++) {
+        //             IntersectionPoint p_ = scene[x]->getIntersection(shadowRay);
+        //             float intersection_distance = (p_.position - l->position).norm();
+        //             if (x != n_origin && p_.intersects && intersection_distance < distanceToLight) {
+        //                 shadow = true;
+        //                 break;
+        //             }
+        //         }
+
+        //         if (shadow)
+        //             continue;
+
+        //         // printf("Intensity: %9.6f, Diffuse term: %9.6f\n", I, max(0.0, N.normalized().dot(L)));
+
+        //         color3 diffuse = (min_p.material.color_reflection) * (I) * (max(0.0, N.normalized().dot(L)));
+
+        //         vec3 R = reflect(L, N).normalized();
+        //         color3 specular = l->emission_color * I * pow(max(0.0, R.dot(V)), 50);
+        //         //printf("Magnitude: %9.6f\n", diffuse.norm());
+        //         // if (specular.norm() > 0.1)
+        //         // printf("Specular: %9.6f, Specular Vector: %9.6f\n", specular.norm(), -1R.dot(V));
+        //         p_color = p_color + diffuse * 0.8 + specular * 0.8;
+        //     }
+        //     p_color = p_color +  min_p.material.color_reflection * 0.4;
+        // }
+        // if (p_color.norm() > 0) {
         //     printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", p_color[0], p_color[1], p_color[2]);
         // }
-    }
+    // }
     fb[pixel_index] = p_color;
 }
 
 __global__ void constructScene(Shape **scene) {
     if (threadIdx.x == 0 && blockIdx.x == 0){
-        scene[0] = new Sphere(vec3(0, 0, -3), 0.5, MATT_RED);
-        scene[1] = new Plane(vec3(1, 1, 1).normalize(), vec3(0, -3, -2), MATT_GREEN, -1.5, -3, -8, 1.5, 3);
+        Eigen::Matrix4f transformation_backwards {{1.0, 0.0, 0.0, 0.0},
+                                            {0.0, 1.0, 0.0, 0.0},
+                                            {0.0, 0.0, 1.0, 0.0},
+                                            {0.0, 0.0, 0.0, 1.0}};
+        scene[0] = new Sphere(MATT_RED, transformation_backwards);
+        // scene[1] = new Plane(vec3(1, 1, 1).normalized(), vec3(0, -3, -2), MATT_GREEN, -1.5, -3, -8, 1.5, 3);
+        // scene[2] = new Cube(vec3(1, 1, -1), vec3(0, 0, -2), MATT_BLUE);
     }
 }
 
@@ -171,7 +180,7 @@ int main() {
     size_t fb_size = num_pixels*sizeof(color3);
 
     // allocate space for scene
-    int n_objs = 2;
+    int n_objs = 1;
     Shape **scene;
 
     int n_lights = 1;
