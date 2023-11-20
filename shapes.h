@@ -71,6 +71,7 @@ class IntersectionPoint {
 };
 
 struct RayPath {
+    int n_intersections;
     IntersectionPoint first;
     IntersectionPoint second;
 };
@@ -94,10 +95,18 @@ class Shape {
         }
     public:
         Material material;
-        __device__ virtual bool intersects(ray& r) = 0;
-        __device__ virtual IntersectionPoint getIntersection(ray& r) = 0;
-        __device__ virtual vec3 getNormal(vec3 position) = 0;
-        __device__ virtual Material getMaterial(vec3 position) = 0;
+        __device__ ray transformRay(ray& r) {
+            return ray(transformPointLocal(r.origin()), transformVectorLocal(r.direction()));
+        }
+        __device__ vec3 transformPointLocal(vec3 v) {return this->transform.inverse() * v;}
+        __device__ vec3 transformVectorLocal(vec3 v) {return this->transform.inverse().linear() * v;}
+        __device__ vec3 transformPointWorld(vec3 v) {return this->transform * v;}
+        __device__ vec3 transformVectorWorld(vec3 v) {return this->transform.linear() * v;}
+        __device__ vec3 transformNormalWorld(vec3 n) {return this->transform.linear() * n;}
+        __device__ virtual RayPath getRayPath(ray& r) = 0;
+        __device__ RayPath getIntersections(ray& r) {
+            return getRayPath(transformRay(r));
+        }
 };
 
 /* Plane on origin with normal (0, 0, 1) */
@@ -114,27 +123,20 @@ class Plane : public Shape {
          xMin(xMin), yMin(yMin), xMax(xMax), yMax(yMax){this->material = material;}
         __device__ vec3 getPoint() {return vec3(0, 0, 0);}
         __device__ vec3 getNormal(vec3 position) {return vec3(0, 0, 1);}
-        __device__ bool intersects (ray& r) {
-            vec3 localOrigin = (this->transform.inverse() * r.origin());
-            vec3 localDirection = (this->transform.linear().inverse() * r.direction());
-            return localDirection.dot(vec3(0, 0, 1)) != 0;
-            }
         __device__ Material getMaterial(vec3 position) {return this->material;}
-        __device__ IntersectionPoint getIntersection(ray &r) {
-            vec3 localOrigin = this->transform.inverse() * r.origin();
-            vec3 localDirection = (this->transform.inverse().linear() * r.direction()).normalized();
-            ray localRay = ray(localOrigin, localDirection);
-            IntersectionPoint res = IntersectionPoint();
-            if (localRay.direction().dot(vec3(0, 0, 1)) != 0) {
-                float d = ((-1 * localRay.origin()).dot(vec3(0, 0, 1)))/(localRay.direction().dot(vec3(0, 0, 1)));
-                vec3 pos = localRay.at(d);
+        __device__ RayPath getRayPath(ray &r) {
+            RayPath res;
+            if (r.direction().dot(vec3(0, 0, 1)) != 0) {
+                res.n_intersections = 1;
+                float d = ((-1 * r.origin()).dot(vec3(0, 0, 1)))/(r.direction().dot(vec3(0, 0, 1)));
+                vec3 pos = r.at(d);
                 if (this -> xMin < pos.x() && this -> yMin < pos.y()
                     && this -> xMax > pos.x() && this -> yMax > pos.y()) {
-                    res.distance = d;
-                    res.intersects = true;
-                    res.normal =  this->transform.linear() * (this->getNormal(pos));
-                    res.position = this->transform * (pos);
-                    res.material = this->getMaterial(pos);               
+                    res.first.distance = d;
+                    res.first.intersects = true;
+                    res.first.normal =  transformNormalWorld(vec3(0, 0, 1));
+                    res.first.position = transformPointWorld(pos);
+                    res.first.material = material;               
                 }
             }
             return res;
@@ -181,52 +183,55 @@ class Cube : public Shape {
             return res.normalized();
         }
 
-        __device__ Material getMaterial(vec3 position) {
-            return this->material;
-        }
+        __device__ RayPath getRayPath(ray& r) {
+            float dirfrac_x = 1.0f / r.direction().x();
+            float dirfrac_y = 1.0f / r.direction().y();
+            float dirfrac_z = 1.0f / r.direction().z();
+            // lb is the corner of AABB with minimal coordinates - left bottom, rt is maximal corner
+            // r.org is origin of ray
+            float t1 = (xMin - r.origin().x())*dirfrac_x;
+            float t2 = (xMax - r.origin().x())*dirfrac_x;
+            float t3 = (yMin - r.origin().y())*dirfrac_y;
+            float t4 = (yMax - r.origin().y())*dirfrac_y;
+            float t5 = (zMin - r.origin().z())*dirfrac_z;
+            float t6 = (zMax - r.origin().z())*dirfrac_z;
 
-        __device__ bool intersects(ray& r) {
-            float tx1 = (xMin - r.origin()[0]) / r.direction()[0];
-            float tx2 = (xMax - r.origin()[0]) / r.direction()[0];
-            float ty1 = (yMin - r.origin()[1]) / r.direction()[1];
-            float ty2 = (yMax - r.origin()[1]) / r.direction()[1];
-            float tz1 = (zMin - r.origin()[2]) / r.direction()[2];
-            float tz2 = (zMax - r.origin()[2]) / r.direction()[2];
+            float tmin = max(max(min(t1, t2), min(t3, t4)), min(t5, t6));
+            float tmax = min(min(max(t1, t2), max(t3, t4)), max(t5, t6));
 
-            float tNear = max(min(tx1, tx2), max(min(ty1, ty2), min(tz1, tz2)));
-            float tFar = min(max(tx1, tx2), min(max(ty1, ty2), max(tz1, tz2)));
-            
-            return !(tNear > tFar || tFar < 0);
-        }
+            RayPath res;
+            res.n_intersections = 0;
 
-        __device__ IntersectionPoint getIntersection(ray& r) {
-            vec3 localOrigin = this->transform.inverse() * r.origin();
-            vec3 localDirection = this->transform.inverse().linear() * r.direction().normalized();
-            ray localRay = ray(localOrigin, localDirection);
-
-            float tx1 = (xMin - localRay.origin()[0]) / localRay.direction()[0];
-            float tx2 = (xMax - localRay.origin()[0]) / localRay.direction()[0];
-            float ty1 = (yMin - localRay.origin()[1]) / localRay.direction()[1];
-            float ty2 = (yMax - localRay.origin()[1]) / localRay.direction()[1];
-            float tz1 = (zMin - localRay.origin()[2]) / localRay.direction()[2];
-            float tz2 = (zMax - localRay.origin()[2]) / localRay.direction()[2];
-
-            float tNear = max(min(tx1, tx2), max(min(ty1, ty2), min(tz1, tz2)));
-            float tFar = min(max(tx1, tx2), min(max(ty1, ty2), max(tz1, tz2)));
-
-            // printf("Near: %9.6f, Far: %9.6f\n", tNear, tFar);
-
-            IntersectionPoint res;
-            res.intersects = false;
-
-            if (!(tNear > tFar || tFar < 0)) {
-                vec3 pos = localRay.at(tNear);
-                res.intersects = true;
-                res.distance = tNear;
-                res.position = this->transform * pos;
-                res.material = this->getMaterial(res.position);
-                res.normal = this->transform.linear() * this->getNormal(pos);
+            // if tmax < 0, ray (line) is intersecting AABB, but the whole AABB is behind us
+            float t;
+            if (tmax < 0)
+            {
+                t = tmax;
+                return res;
             }
+
+            // if tmin > tmax, ray doesn't intersect AABB
+            if (tmin > tmax)
+            {
+                t = tmax;
+                return res;
+            }
+
+            t = tmin;
+            vec3 pos = r.at(t);
+            res.n_intersections = 2;
+            res.first.distance = t;
+            res.first.intersects = true;
+            res.first.material = material;
+            res.first.position = transformPointWorld(pos);
+            res.first.normal = transformNormalWorld(getNormal(pos));
+
+            pos = r.at(tmax);
+            res.second.distance = tmax;
+            res.second.intersects = true;
+            res.second.material = material;
+            res.second.position = transformPointWorld(pos);
+            res.second.normal = transformNormalWorld(getNormal(pos));
             return res;
         }
 };
@@ -238,75 +243,99 @@ class Cylinder : public Shape {
     float zmax = 0.5f;
     public:
         __device__ Cylinder(Material material, Eigen::Affine3f transform) : Shape(transform) {this->material = material;}
-        __device__ Material getMaterial(vec3 position) {
-            return this->material;
-        }
 
         __device__ vec3 getNormal(vec3 position) {
             return (position - vec3(0, 0, position.z())).normalized();
         }
-        __device__ bool intersects(ray& r) {
-            return false;
-        }
 
-        __device__ IntersectionPoint getIntersectionDisc(ray& localRay) {
+        __device__ IntersectionPoint getIntersectionDisc(ray& r, vec3 disc_normal) {
 
             IntersectionPoint res;
             res.intersects = false;
-            /* Check intersection with discs */
-            vec3 p(0, 0, zmax);
-            vec3 n_disc(0, 0, 1);
+            vec3 p = disc_normal * 0.5;
 
-            if (localRay.direction().dot(n_disc) == 0)
+            if (r.direction().dot(disc_normal) == 0)
                 return res;
 
 
 
             float t;
 
-            t = (p - localRay.origin()).dot(n_disc)/(localRay.direction().dot(n_disc));
+            t = (p - r.origin()).dot(disc_normal)/(r.direction().dot(disc_normal));
 
-            vec3 pos = localRay.at(t);
+            vec3 pos = r.at(t);
 
             if ((pos - p).norm() > 0.5)
                 return res;
 
             res.intersects = true;
-            res.position = this->transform * pos;
-            res.material = this->getMaterial(pos);
-            res.normal = this->transform.linear() * n_disc;
+            res.position = transformPointWorld(pos);
+            res.material = material;
+            res.normal = transformNormalWorld(disc_normal);
             res.distance = t;
             return res;
         }
 
-        __device__ IntersectionPoint getIntersection(ray& r) {
-            vec3 localOrigin = this->transform.inverse() * r.origin();
-            vec3 localDirection = this->transform.inverse().linear() * r.direction().normalized();
-            ray localRay(localOrigin, localDirection);
-            float a = pow(localDirection.x(), 2) + pow(localDirection.y(), 2);
-            float b = 2*(localDirection.x() * localOrigin.x() + localDirection.y() * localOrigin.y());
-            float c = pow(localOrigin.x(), 2) + pow(localOrigin.y(), 2) - 0.25;   
+        __device__ RayPath getRayPath(ray& r) {
+            float a = pow(r.direction().x(), 2) + pow(r.direction().y(), 2);
+            float b = 2*(r.direction().x() * r.origin().x() + r.direction().y() * r.origin().y());
+            float c = pow(r.origin().x(), 2) + pow(r.origin().y(), 2) - 0.25;   
             float discriminant = b*b - 4*a*c;
 
-            IntersectionPoint res;
-            res.intersects = false;
+            RayPath res;
+            res.n_intersections = 0;
 
-            if (discriminant < 0)
-                return getIntersectionDisc(localRay);
+            IntersectionPoint disc1 = getIntersectionDisc(r, vec3(0, 0, 1));
+            IntersectionPoint disc2 = getIntersectionDisc(r, vec3(0, 0, -1));
+            IntersectionPoint cylinder1;
+            IntersectionPoint cylinder2;
+
+            if (discriminant > 0) {
+                float d = (-b - sqrt(discriminant) ) / (2.0*a);
+                vec3 pos = r.at(d);
+
+                cylinder1.intersects = (zmin < pos.z() && pos.z() < zmax);
+                cylinder1.position = transformPointWorld(pos);
+                cylinder1.material = material;
+                cylinder1.distance = d;
+                cylinder1.normal = transformNormalWorld(getNormal(pos));
+
+                d = (-b + sqrt(discriminant) ) / (2.0*a);
+                pos = r.at(d);
+
+                cylinder2.intersects = (zmin < pos.z() && pos.z() < zmax);
+                cylinder2.position = transformPointWorld(pos);
+                cylinder2.material = material;
+                cylinder2.distance = d;
+                cylinder2.normal = transformNormalWorld(getNormal(pos));
+            }
+
             
-            
-            float d = (-b - sqrt(discriminant) ) / (2.0*a);
-            vec3 pos = localRay.at(d);
+            if (disc1.intersects && disc2.intersects) {
+                /* Case 1 - Ray intersects both discs */
+                res.n_intersections = 2;
+                res.first = disc1;
+                res.second = disc2;
+            } else if (disc1.intersects && discriminant > 0) {
+                /* Case 2 - Ray intersects disc one and cylinder */
+                res.n_intersections = 2;
+                res.first = disc1;
+                res.second = cylinder1.intersects ? cylinder1 : cylinder2;
+            } else if (disc2.intersects && discriminant > 0) {
+                /* Case 3 - Ray intersects disc two and cylinder */
+                res.n_intersections = 2;
+                res.first = disc2;
+                res.second = cylinder1.intersects ? cylinder1 : cylinder2;
+            } else if (discriminant > 0 && cylinder1.intersects && cylinder2.intersects) {
+                /* Case 4 - Ray intersects cylinder twice */
+                res.n_intersections = 2;
+                res.first = cylinder1;
+                res.second = cylinder2;
+            } else {
+                /* Case 5 - No ray intersections */
+                res.n_intersections = 0;
+            }
 
-            if (pos.z() < zmin || pos.z() > zmax)
-                return getIntersectionDisc(localRay);
-
-            res.intersects = true;
-            res.position = (this->transform * pos);
-            res.material = this->getMaterial(pos);
-            res.distance = d;
-            // printf("Rows: %d, Cols: %d\n", this->transform.rows(), this->transform.cols());
-            res.normal = (this->transform.linear() * this->getNormal(localRay.at(res.distance)));
             return res;
         }
 };
@@ -316,45 +345,118 @@ class Cylinder : public Shape {
 class Sphere : public Shape {
     public:
         __device__ Sphere(Material material, Eigen::Affine3f transform) : Shape(transform) {this->material = material;}
-        __device__ Material getMaterial(vec3 position) {
-            return this->material;
-        }
 
         __device__ vec3 getNormal(vec3 position) {
             return (position).normalized();
         }
 
-        __device__ bool intersects(ray& r) {
-            return false;
-        }
-
-        __device__ IntersectionPoint getIntersection(ray& r) {
-            vec3 localOrigin = this->transform.inverse() * r.origin();
-            vec3 localDirection = this->transform.inverse().linear() * r.direction().normalized();
-            // printf("Direction dot product: %9.6f\n", localDirection.dot(r.direction())/(localDirection.norm() * r.direction().norm()));
-            // printf("LocalDirection: %9.6f %9.6f %9.6f\n", localDirection[0], localDirection[1], localDirection[2]);
-            ray localRay = ray(localOrigin, localDirection);
-            float a = localDirection.dot(localDirection);
-            float b = 2.0f*(localDirection.dot(localOrigin));
-            float c = (localOrigin).dot(localOrigin) - 0.25;
+        __device__ RayPath getRayPath(ray& r) {
+            float a = r.direction().dot(r.direction());
+            float b = 2.0f*(r.direction().dot(r.origin()));
+            float c = (r.origin()).dot(r.origin()) - 0.25;
             float discriminant = b*b - 4*a*c;
-            IntersectionPoint res;
-            res.intersects = false;
+            RayPath res;
             if (discriminant < 0) {
-                return res;
+                res.n_intersections = 0;
+            } else if (discriminant == 0.0f) {
+                res.n_intersections = 1;
+            } else {
+                res.n_intersections = 2;
+            }
+
+            float d;
+            vec3 pos;
+
+            vec3 wOrigin = transformPointWorld(vec3(0, 0, 0));
+
+            switch (res.n_intersections)
+            {
+            case 1:
+                d = (-b ) / (2.0*a);
+                pos = r.at(d);
+                res.first.intersects = true;
+                res.first.position = transformPointWorld(pos);
+                res.first.material = material;
+                res.first.distance = d;
+                res.first.normal = this->transformNormalWorld(this->getNormal(pos));
+                break;
+            case 2:
+                d = (-b - sqrt(discriminant)) / (2.0*a);
+                pos = r.at(d);
+                res.first.intersects = true;
+                res.first.position = transformPointWorld(pos);
+                res.first.material = material;
+                res.first.distance = d;
+                res.first.normal = this->transformNormalWorld(this->getNormal(pos));
+
+                d = (-b - sqrt(discriminant)) / (2.0*a);
+                pos = r.at(d);
+                res.second.intersects = true;
+                res.second.position = transformPointWorld(pos);
+                res.second.material = material;
+                res.second.distance = d;
+                res.second.normal = this->transformNormalWorld(this->getNormal(pos));
+                break;
+            default:
+                break;
             }
             // printf("A: %9.6f B: %9.6f C: %0.6f\n", a, b, c);
             //printf("Sphere LocalDirection: %9.6f %9.6f %9.6f\n",localRay.direction()[0],localRay.direction()[1],localRay.direction()[2]);
             //printf("LocalOrigin: %9.6f %9.6f %9.6f\n",localRay.origin()[0],localRay.origin()[1],localRay.origin()[2]);
             // printf("Discriminant: %9.6f\n", discriminant);
-            res.intersects = true;
-            float d = (-b - sqrt(discriminant) ) / (2.0*a);
-            vec3 pos = localRay.at(d);
-            res.position = (this->transform * pos);
-            res.material = this->getMaterial(pos);
-            res.distance = d;
-            // printf("Rows: %d, Cols: %d\n", this->transform.rows(), this->transform.cols());
-            res.normal = (this->transform.linear() * this->getNormal(localRay.at(res.distance)));
             return res;
         }
 };
+
+
+// class Triangle {
+//     vec3 v0;
+//     vec3 v1;
+//     vec3 v2;
+//     Material material;
+
+//     public:
+//         __device__ Triangle(Material material, vec3 v0, vec3 v1, vec3 v2) : v0(v0), v1(v1), v2(v2), material(material) {}
+//         __device__ IntersectionPoint getIntersection(ray& r) {
+//             IntersectionPoint res;
+//             res.intersects = false;
+//             const float EPSILON = 0.0000001;
+//             vec3 edge1, edge2, rayVecXe2, s, sXe1;
+//             float det, invDet, u, v;
+//             edge1 = v1 - v0;
+//             edge2 = v2 - v0;
+//             rayVecXe2 = r.direction().cross(edge2);
+//             det = edge1.dot(rayVecXe2);
+
+//             if (det > -EPSILON && det < EPSILON)
+//                 return res;    // This ray is parallel to this triangle.
+
+//             invDet = 1.0 / det;
+//             s = r.origin() - v0;
+//             u = invDet * s.dot(rayVecXe2);
+
+//             if (u < 0.0 || u > 1.0)
+//                 return res;
+
+//             sXe1 = s.cross(edge1);
+//             v = invDet * r.direction().dot(sXe1);
+
+//             if (v < 0.0 || u + v > 1.0)
+//                 return res;
+
+//             // At this stage we can compute t to find out where the intersection point is on the line.
+//             float t = invDet * edge2.dot(sXe1);
+
+//             if (t > EPSILON) // ray intersection
+//             {
+//                 res.intersects = true;
+//                 res.distance = t;
+//                 res.position = r.at(t);
+//                 res.material = material;
+//                 res.normal = edge1.cross(edge1);
+//                 return res;
+//             }
+//             else // This means that there is a line intersection but not a ray intersection.
+//                 return res;
+//         }
+// };

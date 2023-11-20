@@ -36,15 +36,6 @@ typedef struct config_s {
     float view_port_height;
 } config_t;
 
-__device__ bool checkIntersections(ray& r, int n_origin, Shape** scene, int n_objects) {
-    for (int i = 0; i < n_objects; i++) {
-        IntersectionPoint p = scene[i]->getIntersection(r);
-        if (i != n_origin && p.intersects) {
-            return true;
-        }
-    }
-    return false;
-}
 
 __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, LightSource** lights, int n_lights) {
     int max_x = config.max_x;
@@ -90,13 +81,29 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
             min_p.intersects = false;
             for (int k = 0; k < n_objects; k++) {
                 Shape *obj = scene[k];
-                IntersectionPoint p = obj->getIntersection(r);
-                if (p.intersects && p.position.z() < camera_pos.z()) {
-                    if (!min_p.intersects) {
-                        min_p = p;
+                RayPath p = obj->getIntersections(r);
+                IntersectionPoint point;
+                if (p.n_intersections == 1) {
+                    point = p.first;
+                } else if (p.n_intersections == 2) {
+                    point = p.first;
+                    if (p.first.position.z() < camera_pos.z()) {
+                        point = p.first;
+                        if (p.second.position.z() < camera_pos.z() && p.second.position.z() > p.first.position.z()) {
+                            point = p.second;
+                        }
                     } else {
-                        if (p.position.z() > min_p.position.z()) {
-                            min_p = p;
+                        point = p.second;
+                    }
+                } else {
+                    point.intersects = false;
+                }
+                if (point.intersects && point.position.z() < camera_pos.z()) {
+                    if (!min_p.intersects) {
+                        min_p = point;
+                    } else {
+                        if (point.position.z() > min_p.position.z()) {
+                            min_p = point;
                             n_origin = k;
                         }
                     }
@@ -106,7 +113,8 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
             if (!min_p.intersects) {
                 break;
             }
-            vec3 hitpoint = r.at(min_p.distance);
+            // if (min_p.position.z() < -6)
+            //     printf("Position: %9.6f\n%9.6f\n%9.6f\n\n", min_p.position[0], min_p.position[1], min_p.position[2]);
             for (int k = 0; k < n_lights; k++) {
                 LightSource *l = lights[k];
 
@@ -123,9 +131,23 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
                 ray shadowRay = ray(P + N * EPSILON, L);
 
                 for (int x = 0; x < n_objects; x++) {
-                    IntersectionPoint p_ = scene[x]->getIntersection(shadowRay);
-                    float intersection_distance = (l->position - p_.position).norm();
-                    if (p_.intersects && intersection_distance < distanceToLight) {
+                    RayPath p_ = scene[x]->getIntersections(shadowRay);
+                    float intersection_distance = distanceToLight;
+                    if (p_.n_intersections == 0) {
+                        continue;
+                    } else if (p_.n_intersections == 1) {
+                        intersection_distance = (l->position - p_.first.position).norm();
+                    } else {
+                        vec3 shadowIntersection;
+                        if ((l->position - p_.first.position).norm() < (l->position - p_.second.position).norm()) {
+                            shadowIntersection = p_.first.position;
+                        } else {
+                            shadowIntersection = p_.second.position;
+                        }
+                        intersection_distance = min((l->position - p_.first.position).norm(), (l->position - p_.second.position).norm());
+                    }
+                    if (intersection_distance < distanceToLight) {
+                        //printf("Intersection Distance: %9.6f, Distance to Light: %9.6f\n", intersection_distance, distanceToLight);
                         shadow = true;
                         break;
                     }
@@ -136,15 +158,17 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
 
                 // printf("Intensity: %9.6f, Diffuse term: %9.6f\n", I, max(0.0, N.normalized().dot(L)));
 
-                color3 diffuse = (min_p.material.color_reflection) * (I) * (max(0.0, N.normalized().dot(L)));
+                color3 diffuse = (min_p.material.color_reflection) * I * (max(0.0, N.normalized().dot(L)));
 
                 vec3 R = reflect(L, N).normalized();
                 color3 specular = l->emission_color * I * pow(max(0.0, R.dot(V)), 50);
-                //printf("Magnitude: %9.6f\n", diffuse.norm());
+                //printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", diffuse[0], diffuse[1], diffuse[2]);
+                //printf("Magnitude: %9.6f\n", I);
                 // if (specular.norm() > 0.1)
                 p_color = p_color + diffuse * 0.8 + specular * 0.8;
             }
             p_color = p_color +  min_p.material.color_reflection * 0.4;
+            //printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", p_color[0], p_color[1], p_color[2]);
         }
         // if (p_color.norm() > 0) {
         //     printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", p_color[0], p_color[1], p_color[2]);
@@ -156,21 +180,25 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
 __global__ void constructScene(Shape **scene) {
     if (threadIdx.x == 0 && blockIdx.x == 0){
         Eigen::Affine3f t1 = IDENTITY;
-        //t1.linear() = Eigen::AngleAxisf(10, vec3(0, 0, 1)).toRotationMatrix();
-        t1.translation() = Eigen::Translation3f(0, 0, -6.0).translation();
+        t1.linear() = Eigen::AngleAxisf(PI/5, vec3(1, 0, 0)).toRotationMatrix();
+        t1.translation() = Eigen::Translation3f(0, 0, -5.0).translation();
         
         Eigen::Affine3f t2 = IDENTITY;
-        t2.linear() = Eigen::AngleAxisf(3*PI/4, vec3(1, 0, 0)).toRotationMatrix();
-        t2.translation() = Eigen::Translation3f(-1, -1, -7.0).translation();
+        t2.linear() = Eigen::AngleAxisf(PI/2, vec3(0, 1, 0)).toRotationMatrix();
+        t2.translation() = Eigen::Translation3f(-1.0, 0, -1.0).translation();
 
         Eigen::Affine3f t3 = IDENTITY;
-        t3.linear() = Eigen::AngleAxisf(PI/4, vec3(1, 0, 0)).toRotationMatrix() * Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
-        t3.translation() = Eigen:: Translation3f(0, 1.5, -6.0).translation();
+        t3.linear() = Eigen::AngleAxisf(3*PI/8, vec3(1, 0, 0)).toRotationMatrix() * Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
+        t3.translation() = Eigen:: Translation3f(0.5, 0.5, -6.0).translation();
+
+        Eigen::Affine3f t4 = IDENTITY;
+        t4.translation() = Eigen:: Translation3f(0, -1, -4.0).translation();
         
-        scene[0] = new Cylinder(MATT_RED, t2);
-        // scene[1] = new Sphere(MATT_BLUE, t1);
-        // scene[2] = new Plane(MATT_GREEN, t2, -1, -1, 5, 5);
-        // scene[3] = new Cube(MATT_RED, t3);
+        //scene[0] = new Cylinder(MATT_RED, t2);
+        scene[0] = new Cylinder(MATT_BLUE, t3);
+        scene[1] = new Plane(MATT_GREEN, t2, -5, -5, 15, 15);
+        scene[2] = new Cube(MATT_RED, t1);
+        scene[3] = new Sphere(MATT_RED, t4);
     }
 }
 
@@ -183,7 +211,7 @@ __global__ void constructScene(Shape **scene) {
 
 __global__ void constructLights(LightSource **lights) {
     if (threadIdx.x == 0 && blockIdx.x == 0)
-        lights[0] = new LightSource(vec3(0, 3, -4.0), color3(1, 1, 1), 400);
+        lights[0] = new LightSource(vec3(0.5, 0.5, 0), color3(1, 1, 1), 120);
 }
 
 
@@ -200,7 +228,7 @@ int main() {
     size_t fb_size = num_pixels*sizeof(color3);
 
     // allocate space for scene
-    int n_objs = 1;
+    int n_objs = 4;
     Shape **scene;
 
     int n_lights = 1;
@@ -212,8 +240,8 @@ int main() {
     checkCudaErrors(cudaDeviceSynchronize());
     checkCudaErrors(cudaMalloc((void **)&lights, n_lights*sizeof(void**)));
     checkCudaErrors(cudaDeviceSynchronize());
-    checkCudaErrors(cudaMalloc((void **)&transforms, n_objs*sizeof(void**)));
-    checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaMalloc((void **)&transforms, n_objs*sizeof(void**)));
+    // checkCudaErrors(cudaDeviceSynchronize());
     constructScene<<<1, 1>>>(scene);
     checkCudaErrors(cudaDeviceSynchronize());
     //constructTransforms<<<1, 1>>>(transforms);
