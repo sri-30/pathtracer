@@ -36,6 +36,27 @@ typedef struct config_s {
     float view_port_height;
 } config_t;
 
+__device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n_objects) {
+    IntersectionPoint min_p;
+    min_p.intersects = false;
+    for (int k = 0; k < n_objects; k++) {
+        Shape *obj = scene[k];
+        RayPath p = obj->getIntersections(r);
+        IntersectionPoint point;
+        if (p.n_intersections == 1) {
+            point = p.first;
+        } else if (p.n_intersections == 2) {
+            point = (p.first.distance < p.second.distance) ? p.first : p.second;
+        } else {
+            point.intersects = false;
+        }
+        if (point.intersects && !min_p.intersects || point.distance < min_p.distance) {
+            min_p = point;
+        }
+    }
+    return min_p;
+}
+
 
 __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, LightSource** lights, int n_lights) {
     int max_x = config.max_x;
@@ -45,8 +66,6 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     int j = threadIdx.y + blockIdx.y * blockDim.y;
     if ((i >= max_x || j >= max_y))
         return;
-    // if((i >= 200) || (j <= 200))
-    //     return;
     int pixel_index = j*max_x + i;
 
     vec3 camera_pos = config.camera_pos;
@@ -77,38 +96,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     for (int i = 0; i < n_samples; i++) {
         ray r = ray(camera_pos, direction);
         for (int j = 0; j < n_bounces; j++) {
-            IntersectionPoint min_p;
-            min_p.intersects = false;
-            for (int k = 0; k < n_objects; k++) {
-                Shape *obj = scene[k];
-                RayPath p = obj->getIntersections(r);
-                IntersectionPoint point;
-                if (p.n_intersections == 1) {
-                    point = p.first;
-                } else if (p.n_intersections == 2) {
-                    point = p.first;
-                    if (p.first.position.z() < camera_pos.z()) {
-                        point = p.first;
-                        if (p.second.position.z() < camera_pos.z() && p.second.position.z() > p.first.position.z()) {
-                            point = p.second;
-                        }
-                    } else {
-                        point = p.second;
-                    }
-                } else {
-                    point.intersects = false;
-                }
-                if (point.intersects && point.position.z() < camera_pos.z()) {
-                    if (!min_p.intersects) {
-                        min_p = point;
-                    } else {
-                        if (point.position.z() > min_p.position.z()) {
-                            min_p = point;
-                            n_origin = k;
-                        }
-                    }
-                }
-            }
+            IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
 
             if (!min_p.intersects) {
                 break;
@@ -193,12 +181,17 @@ __global__ void constructScene(Shape **scene) {
 
         Eigen::Affine3f t4 = IDENTITY;
         t4.translation() = Eigen:: Translation3f(0, -1, -4.0).translation();
+
+        Material light_material;
+        light_material.color_reflection = color3(0, 0, 0);
+        light_material.color_emission = color3(1, 1, 1);
+        light_material.emissive = 100;
         
         //scene[0] = new Cylinder(MATT_RED, t2);
         scene[0] = new Cylinder(MATT_BLUE, t3);
         scene[1] = new Plane(MATT_GREEN, t2, -5, -5, 15, 15);
-        scene[2] = new Cube(MATT_RED, t1);
-        scene[3] = new Sphere(MATT_RED, t4);
+        scene[3] = new Cube(MATT_RED, t1);
+        scene[2] = new Sphere(MATT_RED, t4);
     }
 }
 

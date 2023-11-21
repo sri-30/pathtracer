@@ -55,6 +55,7 @@ class Material {
         color3 color_emission;
         
         float reflectance;
+        float emissive;
 
 };
 
