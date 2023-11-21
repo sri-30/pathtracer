@@ -6,14 +6,13 @@
 #include <Eigen/Geometry>
 #include <cmath>
 
-#define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
-
 typedef Eigen::Matrix<float, 4, 4> Matrix4;
 
 #define IDENTITY Eigen::Affine3f::Identity()
 
 #define PI 3.14159265358979323846
 #define DEG_TO_RAD(X) (X*PI)/180
+#define SMALL_NUMBER 0.00001
 
 __device__ Matrix4 translate(Matrix4 m, float x, float y, float z) {
     return (Matrix4{
@@ -55,16 +54,12 @@ class Material {
         color3 color_emission;
         
         float reflectance;
-        float emissive;
+        float emissive = 0;
 
 };
 
-class IntersectionPoint {
-    public:
-        __device__ IntersectionPoint() : intersects(false) {}
-        __device__ IntersectionPoint(bool intersects, float distance, Material material, vec3 normal) 
-        : intersects(intersects), distance(distance), material(material), normal(normal) {};
-        bool intersects;
+struct IntersectionPoint {
+        bool intersects = false;
         float distance;
         Material material;
         vec3 position;
@@ -91,22 +86,39 @@ class LightSource {
 class Shape {
     protected:
         Eigen::Affine3f transform;
+        Eigen::Affine3f transform_linear;
+        Eigen::Affine3f transform_inv;
+        Eigen::Affine3f transform_inv_linear;
         __device__ Shape(Eigen::Affine3f transform) {
             this->transform = transform;
+            this->transform_inv = transform.inverse();
         }
     public:
         Material material;
         __device__ ray transformRay(ray& r) {
             return ray(transformPointLocal(r.origin()), transformVectorLocal(r.direction()));
         }
-        __device__ vec3 transformPointLocal(vec3 v) {return this->transform.inverse() * v;}
-        __device__ vec3 transformVectorLocal(vec3 v) {return this->transform.inverse().linear() * v;}
+        __device__ vec3 transformPointLocal(vec3 v) {return this->transform_inv * v;}
+        __device__ vec3 transformVectorLocal(vec3 v) {return this->transform_inv.linear() * v;}
         __device__ vec3 transformPointWorld(vec3 v) {return this->transform * v;}
         __device__ vec3 transformVectorWorld(vec3 v) {return this->transform.linear() * v;}
         __device__ vec3 transformNormalWorld(vec3 n) {return this->transform.linear() * n;}
         __device__ virtual RayPath getRayPath(ray& r) = 0;
         __device__ RayPath getIntersections(ray& r) {
-            return getRayPath(transformRay(r));
+            RayPath res = getRayPath(transformRay(r));
+            if (res.n_intersections == 1 && res.first.distance <= SMALL_NUMBER) {
+                res.n_intersections = 0;
+            } else if (res.n_intersections == 2) {
+                if (res.first.distance <= SMALL_NUMBER && res.second.distance <= SMALL_NUMBER) {
+                    res.n_intersections = 0;
+                } else if (res.first.distance <= SMALL_NUMBER) {
+                    res.n_intersections = 1;
+                    res.first = res.second;
+                } else if (res.second.distance <= SMALL_NUMBER) {
+                    res.n_intersections = 1;
+                }
+            }
+            return res;
         }
 };
 
@@ -128,14 +140,15 @@ class Plane : public Shape {
         __device__ RayPath getRayPath(ray &r) {
             RayPath res;
             if (r.direction().dot(vec3(0, 0, 1)) != 0) {
-                res.n_intersections = 1;
+                
                 float d = ((-1 * r.origin()).dot(vec3(0, 0, 1)))/(r.direction().dot(vec3(0, 0, 1)));
+                res.n_intersections = 1;
                 vec3 pos = r.at(d);
                 if (this -> xMin < pos.x() && this -> yMin < pos.y()
                     && this -> xMax > pos.x() && this -> yMax > pos.y()) {
                     res.first.distance = d;
                     res.first.intersects = true;
-                    res.first.normal =  transformNormalWorld(vec3(0, 0, 1));
+                    res.first.normal =  transformNormalWorld(vec3(0, 0, 1).dot(r.direction()) > 0 ? vec3(0, 0, -1) : vec3(0, 0, 1));
                     res.first.position = transformPointWorld(pos);
                     res.first.material = material;               
                 }
@@ -373,7 +386,7 @@ class Sphere : public Shape {
             switch (res.n_intersections)
             {
             case 1:
-                d = (-b ) / (2.0*a);
+                d = (-b - sqrt(discriminant) ) / (2.0*a);
                 pos = r.at(d);
                 res.first.intersects = true;
                 res.first.position = transformPointWorld(pos);
@@ -390,7 +403,7 @@ class Sphere : public Shape {
                 res.first.distance = d;
                 res.first.normal = this->transformNormalWorld(this->getNormal(pos));
 
-                d = (-b - sqrt(discriminant)) / (2.0*a);
+                d = (-b + sqrt(discriminant)) / (2.0*a);
                 pos = r.at(d);
                 res.second.intersects = true;
                 res.second.position = transformPointWorld(pos);

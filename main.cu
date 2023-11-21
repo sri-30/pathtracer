@@ -6,16 +6,17 @@
 #include "shapes.h"
 #include "util.h"
 #include <math.h>
+#include <time.h>
+#include <curand.h>
+#include <curand_kernel.h>
 
-#define MATT_RED Material(color3(1, 0, 0), color3(1, 0, 0))
-#define MATT_GREEN Material(color3(0, 1, 0), color3(0, 1, 0))
-#define MATT_BLUE Material(color3(0, 0, 1), color3(0, 0, 1))
+#define MATT_RED Material(color3(0.4, 0, 0), color3(0.4, 0, 0))
+#define MATT_GREEN Material(color3(0, 0.4, 0), color3(0, 0.4, 0))
+#define MATT_BLUE Material(color3(0, 0, 0.4), color3(0, 0, 0.4))
+#define MATT_WHITE Material(color3(0.5, 0.5, 0.5), color3(0.5, 0.5, 0.5))
 
 #define EPSILON 0.0001
 
-#define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
-
-#define EIGEN_NO_CUDA
 
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line) {
@@ -54,9 +55,76 @@ __device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n
             min_p = point;
         }
     }
+    // if (min_p.intersects && min_p.distance < 0.001) {
+    //     printf("A: %9.6f B: %9.6f C: %0.6f, A: %9.6f B: %9.6f C: %0.6f\n", min_p.position[0], min_p.position[1], min_p.position[2],
+    //     r.origin[0], r.origin[1], r.origin[2]);
+    // }
     return min_p;
 }
 
+
+// __device__ float randomFromNormalDistribution(int offset) {
+//     curandState s;    
+//     // seed a random number generator
+//     int id = threadIdx.x + blockIdx.x * blockDim.x;
+//     //printf("Id: %d\n", id);
+//     curand_init(id, 0, 0, &s);
+//     float res = curand_normal(&s);
+//     return res;
+// }
+
+__device__ float RandomValueNormalDistribution(curandState *s)
+{
+    float theta = 2 * 3.1415926 * curand_uniform(s);
+    float rho = sqrt(-2 * log(curand_uniform(s)));
+    return rho * cos(theta);
+}
+
+__device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
+    vec3 res(curand_normal(s), curand_normal(s), curand_normal(s));
+    res.normalize();
+    normal.normalize();
+    res = res * (res.dot(normal));
+    return res.normalized();
+}
+
+__device__ vec3 cosineWeightedRandomDirectionHemisphere(vec3 normal, curandState *s) {
+    float rv1 = curand_normal(s);
+    float rv2 = curand_normal(s);
+    
+	vec3  uu = normal.cross(vec3(0.0,1.0,1.0)).normalized();
+	vec3  vv = uu.cross(normal).normalized();
+	
+	float ra = sqrt(rv2);
+	float rx = ra*cos(6.2831*rv1); 
+	float ry = ra*sin(6.2831*rv1);
+	float rz = sqrt( 1.0-rv2 );
+	vec3  rr = vec3( rx*uu + ry*vv + rz*normal );
+    
+    return rr.normalized();
+}
+
+__device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) {
+    vec3 contribution(0, 0, 0);
+    vec3 tp(1, 1, 1);
+    int n_bounces = 5;
+    vec3 coefficient = vec3(1, 1, 1);
+
+    for (int i = 0; i <= n_bounces; i++) {
+        IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
+        Material material = min_p.material;
+        color3 emittance = material.color_emission * material.emissive;
+        vec3 newOrigin = min_p.position;
+        vec3 newDirection = randomDirectionHemisphere(min_p.normal, s);
+        const float p = 1 / (2 * PI);
+        float cos_theta = newDirection.dot(min_p.normal);
+        color3 brdf = material.color_reflection / PI;
+        contribution += coefficient.cwiseProduct(emittance);
+        coefficient = coefficient.cwiseProduct(brdf * (cos_theta / p));
+        r = ray(newOrigin, newDirection);
+    }
+    return contribution;
+}
 
 __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, LightSource** lights, int n_lights) {
     int max_x = config.max_x;
@@ -66,6 +134,8 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     int j = threadIdx.y + blockIdx.y * blockDim.y;
     if ((i >= max_x || j >= max_y))
         return;
+    // if ((i <= 5) && (j < 105 || j > 110))
+    //     return;
     int pixel_index = j*max_x + i;
 
     vec3 camera_pos = config.camera_pos;
@@ -82,116 +152,82 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     vec3 viewport_upper_left = camera_pos - vec3(0, 0, focal_length) - viewport_u/2.0 - viewport_v/2.0;
     vec3 pixel00_loc = viewport_upper_left + (pixel_delta_u + pixel_delta_v) * 0.5;
 
+    //uint32_t rngState = ((uint32_t)(i) * (uint32_t)(1973) + (uint32_t)(j) * (uint32_t) (9277) ) | uint(1);
+
 
     color3 ambient(0.3, 0.3, 0.3);
-
-    vec3 p_center = pixel00_loc + (pixel_delta_u * j) + (pixel_delta_v * i);
-    vec3 direction = (p_center - camera_pos);
-    int n_bounces = 1;
-    int n_samples = 1;
+    int n_samples = 100;
     color3 p_color(0, 0, 0);
+    color3 rayColor(1, 1, 1);
+    color3 incomingLight(0, 0, 0);
+    color3 totalLight(0, 0, 0);
     int n_origin;
+    curandState s;
     // printf("A: %9.6f B: %9.6f C: %0.6f\n", direction[0], direction[1], direction[2]);
     // printf("A1: %9.6f B1: %9.6f C1: %0.6f\n", pixel_delta_v[0], pixel_delta_v[1], pixel_delta_v[2]);
-    for (int i = 0; i < n_samples; i++) {
+    curand_init(pixel_index, 0, 0, &s);
+    for (int sample = 0; sample < n_samples; sample++) {
+        vec3 p_center = pixel00_loc + (pixel_delta_u * (j + 0.5 * curand_uniform(&s))) + (pixel_delta_v * (i + 0.5 * curand_uniform(&s)));
+        vec3 direction = (p_center - camera_pos).normalized();
         ray r = ray(camera_pos, direction);
-        for (int j = 0; j < n_bounces; j++) {
-            IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
-
-            if (!min_p.intersects) {
-                break;
-            }
-            // if (min_p.position.z() < -6)
-            //     printf("Position: %9.6f\n%9.6f\n%9.6f\n\n", min_p.position[0], min_p.position[1], min_p.position[2]);
-            for (int k = 0; k < n_lights; k++) {
-                LightSource *l = lights[k];
-
-                vec3 P = min_p.position;
-                vec3 N = min_p.normal;
-                vec3 O = r.origin();
-                vec3 L = ((l->position) - P).normalized();
-                vec3 V = (config.camera_pos - P).normalized();
-
-                float I = l->getIntensity((l->position - P).norm());
-
-                bool shadow = false;
-                float distanceToLight = (l->position - P).norm();
-                ray shadowRay = ray(P + N * EPSILON, L);
-
-                for (int x = 0; x < n_objects; x++) {
-                    RayPath p_ = scene[x]->getIntersections(shadowRay);
-                    float intersection_distance = distanceToLight;
-                    if (p_.n_intersections == 0) {
-                        continue;
-                    } else if (p_.n_intersections == 1) {
-                        intersection_distance = (l->position - p_.first.position).norm();
-                    } else {
-                        vec3 shadowIntersection;
-                        if ((l->position - p_.first.position).norm() < (l->position - p_.second.position).norm()) {
-                            shadowIntersection = p_.first.position;
-                        } else {
-                            shadowIntersection = p_.second.position;
-                        }
-                        intersection_distance = min((l->position - p_.first.position).norm(), (l->position - p_.second.position).norm());
-                    }
-                    if (intersection_distance < distanceToLight) {
-                        //printf("Intersection Distance: %9.6f, Distance to Light: %9.6f\n", intersection_distance, distanceToLight);
-                        shadow = true;
-                        break;
-                    }
-                }
-
-                if (shadow)
-                    continue;
-
-                // printf("Intensity: %9.6f, Diffuse term: %9.6f\n", I, max(0.0, N.normalized().dot(L)));
-
-                color3 diffuse = (min_p.material.color_reflection) * I * (max(0.0, N.normalized().dot(L)));
-
-                vec3 R = reflect(L, N).normalized();
-                color3 specular = l->emission_color * I * pow(max(0.0, R.dot(V)), 50);
-                //printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", diffuse[0], diffuse[1], diffuse[2]);
-                //printf("Magnitude: %9.6f\n", I);
-                // if (specular.norm() > 0.1)
-                p_color = p_color + diffuse * 0.8 + specular * 0.8;
-            }
-            p_color = p_color +  min_p.material.color_reflection * 0.4;
-            //printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", p_color[0], p_color[1], p_color[2]);
-        }
-        // if (p_color.norm() > 0) {
-        //     printf("Colour2: %9.6f\n%9.6f\n%9.6f\n\n", p_color[0], p_color[1], p_color[2]);
-        // }
+        totalLight += tracePath(scene, n_objects, r, &s);
     }
+    p_color = totalLight/n_samples;
     fb[pixel_index] = p_color;
 }
 
 __global__ void constructScene(Shape **scene) {
     if (threadIdx.x == 0 && blockIdx.x == 0){
         Eigen::Affine3f t1 = IDENTITY;
-        t1.linear() = Eigen::AngleAxisf(PI/5, vec3(1, 0, 0)).toRotationMatrix();
-        t1.translation() = Eigen::Translation3f(0, 0, -5.0).translation();
+        t1.translation() = Eigen::Translation3f(-0.5, 0, -4.0).translation();
         
-        Eigen::Affine3f t2 = IDENTITY;
-        t2.linear() = Eigen::AngleAxisf(PI/2, vec3(0, 1, 0)).toRotationMatrix();
-        t2.translation() = Eigen::Translation3f(-1.0, 0, -1.0).translation();
+        /* Floor */
+        Eigen::Affine3f tplane1 = IDENTITY;
+        tplane1.linear() = Eigen::AngleAxisf(PI/2, vec3(0, 1, 0)).toRotationMatrix();
+        tplane1.translation() = Eigen::Translation3f(-1.0, 0, 0.0).translation();
+
+        /* Back Wall */
+        Eigen::Affine3f tplane2 = IDENTITY;
+        //t2.linear() = Eigen::AngleAxisf(PI/2, vec3(0, 1, 0)).toRotationMatrix();
+        tplane2.translation() = Eigen::Translation3f(0.0, 0, -5.0).translation();
+
+        /* Left Wall */
+        Eigen::Affine3f tplane3 = IDENTITY;
+        tplane3.linear() = Eigen::AngleAxisf(PI/2, vec3(1, 0, 0)).toRotationMatrix();
+        tplane3.translation() = Eigen::Translation3f(0.0, -1.0, -5.0).translation();
+        
+        /* Right Wall */
+        Eigen::Affine3f tplane4 = IDENTITY;
+        tplane4.linear() = Eigen::AngleAxisf(-PI/2, vec3(1, 0, 0)).toRotationMatrix();
+        tplane4.translation() = Eigen::Translation3f(0.0, 1.0, -5.0).translation();
+                
+        /* Ceiling */
+        Eigen::Affine3f tplane5 = IDENTITY;
+        tplane5.linear() = Eigen::AngleAxisf(-PI/2, vec3(0, 1, 0)).toRotationMatrix();
+        tplane5.translation() = Eigen::Translation3f(1.5, 0.0, 0.0).translation();
 
         Eigen::Affine3f t3 = IDENTITY;
-        t3.linear() = Eigen::AngleAxisf(3*PI/8, vec3(1, 0, 0)).toRotationMatrix() * Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
-        t3.translation() = Eigen:: Translation3f(0.5, 0.5, -6.0).translation();
+        t3.translation() = Eigen::Translation3f(-0.5, 1.0, -4.0).translation();
 
         Eigen::Affine3f t4 = IDENTITY;
-        t4.translation() = Eigen:: Translation3f(0, -1, -4.0).translation();
+        t4.translation() = Eigen::Translation3f(-0.5, -1.0, -3.0).translation();
 
         Material light_material;
         light_material.color_reflection = color3(0, 0, 0);
         light_material.color_emission = color3(1, 1, 1);
-        light_material.emissive = 100;
+        light_material.emissive = 1;
         
         //scene[0] = new Cylinder(MATT_RED, t2);
-        scene[0] = new Cylinder(MATT_BLUE, t3);
-        scene[1] = new Plane(MATT_GREEN, t2, -5, -5, 15, 15);
-        scene[3] = new Cube(MATT_RED, t1);
-        scene[2] = new Sphere(MATT_RED, t4);
+        
+        scene[0] = new Plane(MATT_WHITE, tplane1, -5, -5, 15, 15);
+        scene[1] = new Plane(MATT_WHITE, tplane2, -5, -5, 15, 15);
+        scene[2] = new Plane(MATT_BLUE, tplane3, -5, -5, 15, 15);
+        scene[3] = new Plane(MATT_BLUE, tplane4, -5, -5, 15, 15);
+        scene[4] = new Plane(MATT_WHITE, tplane5, -5, -5, 15, 15);
+        
+        scene[5] = new Sphere(light_material, t1);
+        scene[6] = new Sphere(MATT_RED, t4);
+        scene[7] = new Sphere(MATT_GREEN, t3);
     }
 }
 
@@ -210,8 +246,8 @@ __global__ void constructLights(LightSource **lights) {
 
 int main() {
 
-    int nx = 800;
-    int ny = 800;
+    int nx = 400;
+    int ny = 400;
 
     int tx = 8;
     int ty = 8;
@@ -221,14 +257,13 @@ int main() {
     size_t fb_size = num_pixels*sizeof(color3);
 
     // allocate space for scene
-    int n_objs = 4;
+    int n_objs = 8;
     Shape **scene;
 
     int n_lights = 1;
     LightSource **lights;
 
     Eigen::Affine3f **transforms;
-
     checkCudaErrors(cudaMalloc((void **)&scene, n_objs*sizeof(void**)));
     checkCudaErrors(cudaDeviceSynchronize());
     checkCudaErrors(cudaMalloc((void **)&lights, n_lights*sizeof(void**)));
@@ -254,7 +289,10 @@ int main() {
     float focal_length = (v_width/2) / tan(DEG_TO_RAD(fov/2));
 
     config_t config = {vec3(0, 0, 0), nx, ny, focal_length, v_height};
-    
+
+    curandState *devStates;
+    //checkCudaErrors(cudaMalloc((void **)&devStates, blocks * threads *sizeof(curandState)));
+
     render<<<blocks, threads>>>(fb, config, scene, n_objs, lights, n_lights);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
