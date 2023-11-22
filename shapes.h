@@ -14,35 +14,6 @@ typedef Eigen::Matrix<float, 4, 4> Matrix4;
 #define DEG_TO_RAD(X) (X*PI)/180
 #define SMALL_NUMBER 0.00001
 
-__device__ Matrix4 translate(Matrix4 m, float x, float y, float z) {
-    return (Matrix4{
-            {1.0, 0.0, 0.0, x},
-            {0.0, 1.0, 0.0, y},
-            {0.0, 0.0, 1.0, z},
-            {0.0, 0.0, 0.0, 1.0}}) * (m);
-}
-
-__device__ Matrix4 scale(Matrix4 m, float x, float y, float z) {
-    return (Matrix4{
-            {x, 0.0, 0.0, 0.0},
-            {0.0, y, 0.0, 0.0},
-            {0.0, 0.0, z, 0.0},
-            {0.0, 0.0, 0.0, 1.0}}) * (m);
-}
-
-/* Rodrigues' Rotation Formula */
-__device__ Matrix4 rotate(Matrix4 m, vec3 axis, float angle) {
-    // vec3 k = axis.normalized();
-    // Matrix4 K ({
-    //     {0, -k.z(), -k.y(), 0},
-    //     {k.z(), 0, -k.x(), 0},
-    //     {-k.y(), k.x(), 0, 0},
-    //     {0, 0, 0, 1}
-    // });
-    // return (IDENTITY + sin(DEG_TO_RAD(angle))*K + (1.0f-cos(DEG_TO_RAD(angle)))*K*K) * m;
-    
-}
-
 class Shape;
 
 class Material {
@@ -55,8 +26,22 @@ class Material {
         
         float reflectance;
         float emissive = 0;
+        float roughness = 0.1;
+
+        bool refractive = false;
+        float refractive_index;
 
 };
+
+__device__ vec3 refract(vec3 I, vec3 N, float n1, float n2)
+{
+    const float n = n2/n1;
+    float cosI = -N.dot(I);
+    const float sinT2 = n * n * (1.0 - cosI * cosI);
+    if(sinT2 > 1.0) return vec3(0, 0, 0); // TIR
+    const float cosT = sqrt(1.0 - sinT2);
+    return n * I + (n * cosI - cosT) * N;
+}
 
 struct IntersectionPoint {
         bool intersects = false;

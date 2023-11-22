@@ -53,38 +53,20 @@ __device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n
         }
         if (point.intersects && !min_p.intersects || point.distance < min_p.distance) {
             min_p = point;
+            if (min_p.normal.dot(r.direction()) > 0){
+                min_p.normal = -1 * min_p.normal;}
         }
     }
-    // if (min_p.intersects && min_p.distance < 0.001) {
-    //     printf("A: %9.6f B: %9.6f C: %0.6f, A: %9.6f B: %9.6f C: %0.6f\n", min_p.position[0], min_p.position[1], min_p.position[2],
-    //     r.origin[0], r.origin[1], r.origin[2]);
-    // }
     return min_p;
 }
 
 
-// __device__ float randomFromNormalDistribution(int offset) {
-//     curandState s;    
-//     // seed a random number generator
-//     int id = threadIdx.x + blockIdx.x * blockDim.x;
-//     //printf("Id: %d\n", id);
-//     curand_init(id, 0, 0, &s);
-//     float res = curand_normal(&s);
-//     return res;
-// }
-
-__device__ float RandomValueNormalDistribution(curandState *s)
-{
-    float theta = 2 * 3.1415926 * curand_uniform(s);
-    float rho = sqrt(-2 * log(curand_uniform(s)));
-    return rho * cos(theta);
-}
 
 __device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
     vec3 res(curand_normal(s), curand_normal(s), curand_normal(s));
     res.normalize();
     normal.normalize();
-    res = res * (res.dot(normal));
+    res = res.dot(normal) < 0 ? -1 * res : res;
     return res.normalized();
 }
 
@@ -107,12 +89,29 @@ __device__ vec3 cosineWeightedRandomDirectionHemisphere(vec3 normal, curandState
 __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) {
     vec3 contribution(0, 0, 0);
     vec3 tp(1, 1, 1);
-    int n_bounces = 5;
+    int n_bounces = 50;
     vec3 coefficient = vec3(1, 1, 1);
+    int refractive_index_current = 1;
 
     for (int i = 0; i <= n_bounces; i++) {
         IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
+        if (!min_p.intersects)
+            break;
         Material material = min_p.material;
+        if (material.refractive) {
+            vec3 refract_dir = refract(r.direction(), min_p.normal, refractive_index_current, (refractive_index_current == 1 ? material.refractive_index : 1));
+            //printf("A: %9.6f B: %9.6f C: %0.6f\n", refract_dir[0], refract_dir[1], refract_dir[2]);
+            if (refract_dir.norm() != 0){
+                r = ray(min_p.position, refract_dir.normalized());
+                n_bounces++;
+                refractive_index_current = (refractive_index_current == 1 ? material.refractive_index : 1);
+            } else {
+                r = ray(min_p.position, reflect(r.direction(), min_p.normal).normalized());
+                n_bounces++;
+            }
+            r = ray(r.origin() + EPSILON * r.direction(), r.direction());
+            continue;
+        }
         color3 emittance = material.color_emission * material.emissive;
         vec3 newOrigin = min_p.position;
         vec3 newDirection = randomDirectionHemisphere(min_p.normal, s);
@@ -167,7 +166,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     // printf("A1: %9.6f B1: %9.6f C1: %0.6f\n", pixel_delta_v[0], pixel_delta_v[1], pixel_delta_v[2]);
     curand_init(pixel_index, 0, 0, &s);
     for (int sample = 0; sample < n_samples; sample++) {
-        vec3 p_center = pixel00_loc + (pixel_delta_u * (j + 0.5 * curand_uniform(&s))) + (pixel_delta_v * (i + 0.5 * curand_uniform(&s)));
+        vec3 p_center = pixel00_loc + (pixel_delta_u * (j + 0 * curand_uniform(&s))) + (pixel_delta_v * (i + 0 * curand_uniform(&s)));
         vec3 direction = (p_center - camera_pos).normalized();
         ray r = ray(camera_pos, direction);
         totalLight += tracePath(scene, n_objects, r, &s);
@@ -179,7 +178,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
 __global__ void constructScene(Shape **scene) {
     if (threadIdx.x == 0 && blockIdx.x == 0){
         Eigen::Affine3f t1 = IDENTITY;
-        t1.translation() = Eigen::Translation3f(-0.5, 0, -4.0).translation();
+        t1.translation() = Eigen::Translation3f(0.4, 0, -4.0).translation();
         
         /* Floor */
         Eigen::Affine3f tplane1 = IDENTITY;
@@ -207,15 +206,22 @@ __global__ void constructScene(Shape **scene) {
         tplane5.translation() = Eigen::Translation3f(1.5, 0.0, 0.0).translation();
 
         Eigen::Affine3f t3 = IDENTITY;
-        t3.translation() = Eigen::Translation3f(-0.5, 1.0, -4.0).translation();
+        t3.translation() = Eigen::Translation3f(-0.5, 0.5, -4.0).translation();
 
         Eigen::Affine3f t4 = IDENTITY;
-        t4.translation() = Eigen::Translation3f(-0.5, -1.0, -3.0).translation();
+        t4.translation() = Eigen::Translation3f(-0.5, -0.5, -3.0).translation();
+
+        Eigen::Affine3f t5 = IDENTITY;
+        t5.translation() = Eigen::Translation3f(-0.5, 0.5, -3.0).translation();
 
         Material light_material;
         light_material.color_reflection = color3(0, 0, 0);
         light_material.color_emission = color3(1, 1, 1);
-        light_material.emissive = 1;
+        light_material.emissive = 20;
+
+        Material glass;
+        glass.refractive = true;
+        glass.refractive_index = 1.5f;
         
         //scene[0] = new Cylinder(MATT_RED, t2);
         
@@ -228,6 +234,7 @@ __global__ void constructScene(Shape **scene) {
         scene[5] = new Sphere(light_material, t1);
         scene[6] = new Sphere(MATT_RED, t4);
         scene[7] = new Sphere(MATT_GREEN, t3);
+        //scene[8] = new Sphere(glass, t5);
     }
 }
 
