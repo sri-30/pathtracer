@@ -19,19 +19,30 @@ class Shape;
 class Material {
     public:
         __device__ Material() {}
-        __device__ Material(color3 color_reflection, color3 color_emission) : color_reflection(color_reflection), color_emission(color_emission) {}
+        __device__ Material(color3 color_reflection, color3 color_emission) : color_reflection(color_reflection), color_emission(color_emission) {
+            diffuse = color_reflection * (1.0f - metalness);
+            specular = (1-metalness)*vec3(0.4f, 0.4f, 0.4f) + metalness*color_reflection;
+        }
 
         color3 color_reflection;
         color3 color_emission;
+        color3 diffuse;
+        color3 specular = vec3(0.6, 0.6, 0.6);
+        
         
         float reflectance;
         float emissive = 0;
         float roughness = 0.1;
+        float metalness = 0.1;
 
         bool refractive = false;
         float refractive_index;
 
 };
+
+__device__ inline float GeometryShadowing(vec3 X, vec3 N, float k) {
+    return N.dot(X)/(N.dot(X) * (1 - k) + k);
+}
 
 __device__ vec3 refract(vec3 I, vec3 N, float n1, float n2)
 {
