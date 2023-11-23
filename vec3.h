@@ -24,7 +24,7 @@ __device__ vec3 vec423(vec4 v) {
 };
 
 __device__ vec3 reflect(vec3 original, vec3 normal) {
-    return (normal * (2 * original.dot(normal))) - (original);
+    return original - 2 * (original.dot(normal) * normal);
 };
 
 // class vec3 {

@@ -19,24 +19,16 @@ class Shape;
 class Material {
     public:
         __device__ Material() {}
-        __device__ Material(color3 color_reflection, color3 color_emission) : color_reflection(color_reflection), color_emission(color_emission) {
-            diffuse = color_reflection * (1.0f - metalness);
-            specular = (1-metalness)*vec3(0.4f, 0.4f, 0.4f) + metalness*color_reflection;
-        }
 
-        color3 color_reflection;
-        color3 color_emission;
-        color3 diffuse;
-        color3 specular = vec3(0.6, 0.6, 0.6);
-        
-        
-        float reflectance;
-        float emissive = 0;
-        float roughness = 0.1;
-        float metalness = 0.1;
-
-        bool refractive = false;
-        float refractive_index;
+        vec3  albedo = vec3(0.0f, 0.0f, 0.0f);;              // the color used for diffuse lighting
+        vec3  emissive = vec3(0.0f, 0.0f, 0.0f);;            // how much the surface glows
+        float specularChance = 0.0f;;      // percentage chance of doing a specular reflection
+        float specularRoughness = 0.0f;;   // how rough the specular reflections are
+        vec3  specularColor = vec3(0.0f, 0.0f, 0.0f);;       // the color tint of specular reflections
+        float IOR = 1.0f;                 // index of refraction. used by fresnel and refraction.
+        float refractionChance = 0.0f;;    // percent chance of doing a refractive transmission
+        float refractionRoughness = 0.0f; // how rough the refractive transmissions are
+        vec3  refractionColor = vec3(0.0f, 0.0f, 0.0f);;     // absorption for beer's law    
 
 };
 
@@ -44,9 +36,8 @@ __device__ inline float GeometryShadowing(vec3 X, vec3 N, float k) {
     return N.dot(X)/(N.dot(X) * (1 - k) + k);
 }
 
-__device__ vec3 refract(vec3 I, vec3 N, float n1, float n2)
+__device__ vec3 refract(vec3 I, vec3 N, float n)
 {
-    const float n = n2/n1;
     float cosI = -N.dot(I);
     const float sinT2 = n * n * (1.0 - cosI * cosI);
     if(sinT2 > 1.0) return vec3(0, 0, 0); // TIR
@@ -60,6 +51,7 @@ struct IntersectionPoint {
         Material material;
         vec3 position;
         vec3 normal;
+        bool inside;
 };
 
 struct RayPath {
@@ -368,8 +360,6 @@ class Sphere : public Shape {
             RayPath res;
             if (discriminant < 0) {
                 res.n_intersections = 0;
-            } else if (discriminant == 0.0f) {
-                res.n_intersections = 1;
             } else {
                 res.n_intersections = 2;
             }
@@ -379,25 +369,14 @@ class Sphere : public Shape {
 
             vec3 wOrigin = transformPointWorld(vec3(0, 0, 0));
 
-            switch (res.n_intersections)
-            {
-            case 1:
-                d = (-b - sqrt(discriminant) ) / (2.0*a);
-                pos = r.at(d);
-                res.first.intersects = true;
-                res.first.position = transformPointWorld(pos);
-                res.first.material = material;
-                res.first.distance = d;
-                res.first.normal = this->transformNormalWorld(this->getNormal(pos));
-                break;
-            case 2:
+            if (res.n_intersections == 2) {
                 d = (-b - sqrt(discriminant)) / (2.0*a);
                 pos = r.at(d);
                 res.first.intersects = true;
                 res.first.position = transformPointWorld(pos);
                 res.first.material = material;
                 res.first.distance = d;
-                res.first.normal = this->transformNormalWorld(this->getNormal(pos));
+                res.first.normal = (this->transformPointWorld(pos) - wOrigin).normalized();
 
                 d = (-b + sqrt(discriminant)) / (2.0*a);
                 pos = r.at(d);
@@ -405,10 +384,7 @@ class Sphere : public Shape {
                 res.second.position = transformPointWorld(pos);
                 res.second.material = material;
                 res.second.distance = d;
-                res.second.normal = this->transformNormalWorld(this->getNormal(pos));
-                break;
-            default:
-                break;
+                res.second.normal = (this->transformPointWorld(pos) - wOrigin).normalized();
             }
             // printf("A: %9.6f B: %9.6f C: %0.6f\n", a, b, c);
             //printf("Sphere LocalDirection: %9.6f %9.6f %9.6f\n",localRay.direction()[0],localRay.direction()[1],localRay.direction()[2]);
