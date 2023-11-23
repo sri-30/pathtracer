@@ -36,13 +36,13 @@ __device__ inline float GeometryShadowing(vec3 X, vec3 N, float k) {
     return N.dot(X)/(N.dot(X) * (1 - k) + k);
 }
 
-__device__ vec3 refract(vec3 I, vec3 N, float n)
+__device__ vec3 refract(vec3 I, vec3 N, float eta)
 {
-    float cosI = -N.dot(I);
-    const float sinT2 = n * n * (1.0 - cosI * cosI);
-    if(sinT2 > 1.0) return vec3(0, 0, 0); // TIR
-    const float cosT = sqrt(1.0 - sinT2);
-    return n * I + (n * cosI - cosT) * N;
+    float k = 1.0 - eta * eta * (1.0 - (N.dot(I)) * (N.dot(I)));
+    if (k < 0.0){
+        return vec3(0, 0, 0); }
+    else{
+        return eta * I - (eta * (N.dot(I)) + sqrt(k)) * N;}
 }
 
 struct IntersectionPoint {

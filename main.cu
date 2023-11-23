@@ -63,13 +63,7 @@ __device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n
         if (point.intersects && (!min_p.intersects || point.distance < min_p.distance)) {
             min_p = point;
             min_p.inside = min_p.normal.dot(r.direction()) > 0;
-            // if (min_p.inside && p.n_intersections == 2 && min_p.distance == p.second.distance){
-            //     printf("Distances: %9.6f, %9.6f\n", p.first.distance, p.second.distance);
-            //     //printf("A: %9.6f B: %9.6f C: %9.6f\n", min_p.position[0], min_p.position[1], min_p.position[2]);
-            // }
-                // printf("Object : %d, Distance: %9.6f\n", k, min_p.distance);}
-            // if (min_p.normal.dot(r.direction()) > 0){
-            //     min_p.normal = -1 * min_p.normal;}
+            if (min_p.inside) {min_p.normal = -1 * min_p.normal;}
         }
     }
     return min_p;
@@ -192,7 +186,7 @@ __device__ float FresnelReflectAmount(float n1, float n2, vec3 normal, vec3 inci
 
 __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) {
     vec3 contribution(0.0f, 0.0f, 0.0f);
-    int n_bounces = 1;
+    int n_bounces = 100;
     vec3 coefficient = vec3(1.0f, 1.0f, 1.0f);
 
     for (int i = 0; i <= n_bounces; i++) {
@@ -200,8 +194,9 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
         
         // if the ray missed, we are done
-        if (!min_p.intersects)
+        if (!min_p.intersects){
             break;
+        }
 
         Material material = min_p.material;
         
@@ -214,7 +209,6 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         // get the pre-fresnel chances
         float specularChance = material.specularChance;
         float refractionChance = material.refractionChance;
-        //float diffuseChance = max(0.0f, 1.0f - (refractionChance + specularChance));
         
         // take fresnel into account for specularChance and adjust other chances.
         // specular takes priority.
@@ -222,14 +216,13 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         float rayProbability = 1.0f;
         if (specularChance > 0.0f)
         {
-        	specularChance = FresnelReflectAmount(
-            	1.0,
-            	material.IOR,
-            	r.direction(), min_p.normal, material.specularChance, 1.0f);
+            specularChance = FresnelReflectAmount(
+            	min_p.inside ? material.IOR : 1.0,
+            	!min_p.inside ? material.IOR : 1.0,
+            	r.direction(), min_p.normal, min_p.material.specularChance, 1.0f);
             
-            float chanceMultiplier = (1.0f - specularChance) / (1.0f - material.specularChance);
+            float chanceMultiplier = (1.0f - specularChance) / (1.0f - min_p.material.specularChance);
             refractionChance *= chanceMultiplier;
-            //diffuseChance *= chanceMultiplier;
         }
         
         // calculate whether we are going to do a diffuse, specular, or refractive ray
@@ -250,22 +243,15 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         {
             rayProbability = 1.0f - (specularChance + refractionChance);
         }
+
+        // if (doRefraction != 1.0f) {
+        //     printf("yes\n");
+        // }
         
         // numerical problems can cause rayProbability to become small enough to cause a divide by zero.
 		rayProbability = max(rayProbability, 0.001f);
 
-        vec3 newPosition;
-        
-        // update the ray position
-        if (doRefraction == 1.0f)
-        {
-            newPosition = (min_p.position);
-        }
-        else
-        {
-            newPosition = (min_p.position);
-        }
-         
+        vec3 newPosition = min_p.position;
         // Calculate a new ray direction.
         // Diffuse uses a normal oriented cosine weighted hemisphere sample.
         // Perfectly smooth specular uses the reflection ray.
@@ -276,11 +262,12 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         vec3 specularRayDir = reflect(r.direction(), min_p.normal).normalized();
         specularRayDir = (lerp_vec(specularRayDir, diffuseRayDir, material.specularRoughness*material.specularRoughness)).normalized();
 
-        vec3 refractionRayDir = refract(r.direction(), min_p.normal, min_p.inside ? material.IOR : 1.0f / material.IOR);
-        refractionRayDir = (lerp_vec(refractionRayDir, (-min_p.normal + sampleHemisphere(curand_uniform(s), curand_uniform(s))), material.refractionRoughness*material.refractionRoughness).normalized()).normalized();
-                
+        vec3 refractionRayDir = refract(r.direction(), min_p.normal, min_p.inside ? min_p.material.IOR : 1.0f / min_p.material.IOR).normalized();
+        
+        refractionRayDir = (lerp_vec(refractionRayDir, (min_p.normal + sampleHemisphere(curand_uniform(s), curand_uniform(s))).normalized(), material.refractionRoughness*material.refractionRoughness).normalized());
+        
         vec3 newDirection = lerp_vec(diffuseRayDir, specularRayDir, doSpecular).normalized();
-        //rayDir = mix(rayDir, refractionRayDir, doRefraction);
+        newDirection = lerp_vec(newDirection, refractionRayDir, doRefraction).normalized();
         
 		// add in emissive lighting
         if (material.emissive.norm() > 0){
@@ -291,11 +278,6 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         if (doRefraction == 0.0f)
             coefficient = coefficient.cwiseProduct(lerp_vec(material.albedo, material.specularColor, doSpecular));
         
-        // if (n_bounces > 1 && material.emissive.norm() != 0.0f) {
-        //     vec3 foo = lerp_vec(material.albedo, material.specularColor, doSpecular);
-        //     printf("A: %9.6f B: %9.6f C: %9.6f, CO: %9.6f CO: %9.6f CO: %9.6f\n", coefficient[0], coefficient[1], coefficient[2], contribution[0], contribution[1], contribution[2]);
-        // }
-
         // since we chose randomly between diffuse, specular, refract,
         // we need to account for the times we didn't do one or the other.
         coefficient = coefficient / rayProbability;
@@ -322,8 +304,8 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     int j = threadIdx.y + blockIdx.y * blockDim.y;
     if ((i >= max_x || j >= max_y))
         return;
-    if ((i < 100 || i > 105) || (j < 100 || j > 105))
-        return;
+    // if ((i < 200 || i > 205) || (j < 200 || j > 205))
+    //     return;
     int pixel_index = j*max_x + i;
 
     vec3 camera_pos = config.camera_pos;
@@ -344,7 +326,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
 
 
     color3 ambient(0.3, 0.3, 0.3);
-    int n_samples = 1000;
+    int n_samples = 2000;
     color3 p_color(0, 0, 0);
     color3 rayColor(1, 1, 1);
     color3 incomingLight(0, 0, 0);
@@ -402,7 +384,8 @@ __global__ void constructScene(Shape **scene) {
         t4.translation() = Eigen::Translation3f(-0.5, -0.5, -3.0).translation();
 
         Eigen::Affine3f t5 = IDENTITY;
-        t5.translation() = Eigen::Translation3f(-0.5, 0.5, -3.0).translation();
+        t5.translation() = Eigen::Translation3f(0.0, 0.0, -2.0).translation();
+        t5.linear() = Eigen::AngleAxisf(PI/4, vec3(1, 0, 0)).toRotationMatrix();
 
         Material light_material;
         light_material.emissive = vec3(1.0f, 0.9f, 0.7f) * 10.0f;   
@@ -415,7 +398,7 @@ __global__ void constructScene(Shape **scene) {
         base.specularChance = 0.0f;
         base.specularRoughness = 0.0f;
         base.specularColor = vec3(1.0f, 1.0f, 1.0f) * 0.8f;
-        base.IOR = 1.1;
+        base.IOR = 1.1f;
         base.refractionChance = 0.0f;
 
         Material blue_wall = base;
@@ -449,16 +432,16 @@ __global__ void constructScene(Shape **scene) {
         dielectric_ball.albedo = vec3(0, 0.4f, 0);
         white_ball.albedo = vec3(0.9f, 0.25f, 0.25f);
 
-        scene[0] = new Plane(floor, tplane1, -5, -5, 15, 15);
+        scene[0] = new Plane(white_wall, tplane1, -5, -5, 15, 15);
         scene[1] = new Plane(white_wall, tplane2, -5, -5, 15, 15);
-        scene[2] = new Plane(blue_wall, tplane3, -5, -5, 15, 15);
-        scene[3] = new Plane(blue_wall, tplane4, -5, -5, 15, 15);
+        scene[2] = new Plane(white_wall, tplane3, -5, -5, 15, 15);
+        scene[3] = new Plane(white_wall, tplane4, -5, -5, 15, 15);
         scene[4] = new Plane(light_material, tplane5, -5, -5, 15, 15);
         
-        scene[5] = new Sphere(white_ball, t1);
+        scene[5] = new Sphere(dielectric_ball, t3);
         scene[6] = new Sphere(metallic_ball, t4);
-        scene[7] = new Sphere(dielectric_ball, t3);
-        scene[8] = new Sphere(glass, t5);
+        //scene[7] = new Sphere(dielectric_ball, t3);
+        //scene[8] = new Cube(glass, t5);
     }
 }
 
@@ -488,7 +471,7 @@ int main() {
     size_t fb_size = num_pixels*sizeof(color3);
 
     // allocate space for scene
-    int n_objs = 9;
+    int n_objs = 7;
     Shape **scene;
 
     int n_lights = 1;
