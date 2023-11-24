@@ -20,15 +20,32 @@ class Material {
     public:
         __device__ Material() {}
 
-        vec3  albedo = vec3(0.0f, 0.0f, 0.0f);;              // the color used for diffuse lighting
-        vec3  emissive = vec3(0.0f, 0.0f, 0.0f);;            // how much the surface glows
-        float specularChance = 0.0f;;      // percentage chance of doing a specular reflection
-        float specularRoughness = 0.0f;;   // how rough the specular reflections are
-        vec3  specularColor = vec3(0.0f, 0.0f, 0.0f);;       // the color tint of specular reflections
-        float IOR = 1.0f;                 // index of refraction. used by fresnel and refraction.
-        float refractionChance = 0.0f;;    // percent chance of doing a refractive transmission
-        float refractionRoughness = 0.0f; // how rough the refractive transmissions are
-        vec3  refractionColor = vec3(0.0f, 0.0f, 0.0f);;     // absorption for beer's law    
+        /* Diffuse colour of surface */
+        vec3 albedo = vec3(0.0f, 0.0f, 0.0f);
+        
+        /* Emissitivity of the surface */
+        vec3 emissive = vec3(0.0f, 0.0f, 0.0f);
+        
+        /* Base Reflectivity of Material when viewed at normal */
+        float f0 = 0.0f;
+
+        /* Roughness of Specular Reflections */
+        float specularRoughness = 0.0f;
+
+        /* Colour of Specular Reflections */
+        vec3  specularColor = vec3(0.0f, 0.0f, 0.0f);
+
+        /* Index of Refraction */
+        float IOR = 1.0f;
+
+        /* Probability of refraction */
+        float transparency = 0.0f;
+
+        /* Roughness of refraction */
+        float refractionRoughness = 0.0f;
+
+        /* Attenuation of light - colour absorbed by material */
+        vec3 refractionColor = vec3(0.0f, 0.0f, 0.0f);  
 
 };
 

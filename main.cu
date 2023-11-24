@@ -69,8 +69,7 @@ __device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n
     return min_p;
 }
 
-
-
+/* Uniformly Distributed Random Directions in Hemisphere */
 __device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
     vec3 res(curand_normal(s), curand_normal(s), curand_normal(s));
     res.normalize();
@@ -78,30 +77,6 @@ __device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
     res = res.dot(normal) < 0 ? -1 * res : res;
     return res.normalized();
 }
-
-__device__ vec3 cosineWeightedRandomDirectionHemisphere(vec3 normal, curandState *s) {
-    float rv1 = curand_normal(s);
-    float rv2 = curand_normal(s);
-    
-	vec3  uu = normal.cross(vec3(0.0,1.0,1.0)).normalized();
-	vec3  vv = uu.cross(normal).normalized();
-	
-	float ra = sqrt(rv2);
-	float rx = ra*cos(6.2831*rv1); 
-	float ry = ra*sin(6.2831*rv1);
-	float rz = sqrt( 1.0-rv2 );
-	vec3  rr = vec3( rx*uu + ry*vv + rz*normal );
-    
-    return rr.normalized();
-}
-
-// __device__ vec3 sampleLights(LightSource **lights, int n_lights, vec3 position) {
-//     vec3 res(0, 0, 0);
-//     for (int i = 0; i < n_lights; i++) {
-//         res += lights[i]->emission_color*(lights[i]->getIntensity((lights[i]->position - position).norm()));
-//     }
-//     return res;
-// } 
 
 __device__ Eigen::Quaternionf getRotationToZAxis(vec3 input) {
 
@@ -126,10 +101,6 @@ __device__ Eigen::Quaternionf invertRotation(Eigen::Quaternionf q) {
 
 /* Cosine-Weighted Distribution Sampling */
 __device__ vec3 sampleHemisphere(float u1, float u2) {
-    // float a = sqrt(x);
-    // float b = 2*PI*y;
-
-    // return vec3(a*cos(b), a*sin(b), sqrt(1 - x));
     float z = u1 * 2.0f - 1.0f;
     float a = u2 * 2*PI;
     float r = sqrt(1.0f - z * z);
@@ -151,146 +122,141 @@ __device__ vec3 sampleGGXWalter(vec3 Vlocal, float alpha, float x, float y) {
 	return vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta).normalized();
 }
 
-__device__ vec3 evalFresnelSchlick(vec3 f0, float NdotS)
-{
-	return f0 + (vec3(1, 1, 1) - f0) * pow(1.0f - NdotS, 5.0f);
+__device__ float FresnelSchlick(float n1, float n2, float cosTheta) {
+    float r0 = pow((n1-n2)/(n1+n2), 2);
+    return r0 + (1 - r0)*pow(1-cosTheta, 5);
 }
 
-__device__ float luminance(vec3 rgb)
-{
-	return rgb.dot(vec3(0.2126f, 0.7152f, 0.0722f));
-}
+__device__ float getFresnelRatio(vec3 N, vec3 I, float f0, float f90, float n1, float n2) {
+        float cX = -N.dot(I);
 
-__device__ float FresnelReflectAmount(float n1, float n2, vec3 normal, vec3 incident, float f0, float f90)
-{
-        // Schlick aproximation
-        float r0 = (n1-n2) / (n1+n2);
-        r0 *= r0;
-        float cosX = -normal.dot(incident);
-        if (n1 > n2)
-        {
-            float n = n1/n2;
-            float sinT2 = n*n*(1.0-cosX*cosX);
-            // Total internal reflection
-            if (sinT2 > 1.0)
-                return f90;
-            cosX = sqrt(1.0-sinT2);
+        /* Check for TIR - Check if Sin2 critical angle > 1.0 */
+        if (n1 > n2) {
+                float n = n1/n2;
+                float s2 = pow(n,2)*(1.0-pow(cX, 2));
+                if (s2 > 1.0)
+                    return f90;
+                cX = sqrt(1.0-s2);
         }
-        float x = 1.0-cosX;
-        float ret = r0+(1.0-r0)*x*x*x*x*x;
 
-        // adjust reflect multiplier for object reflectivity
-        return lerp(f0, f90, ret);
+        float fresnel_res = FresnelSchlick(n1, n2, cX);
+
+        /* Adjust for material base reflectivity */
+        return lerp(f0, f90, fresnel_res);
 }
+
+// __device__ vec3 getGGXMicrofacet(float u1, float u2, float roughness, vec3 N)
+// {
+// 	// Get an orthonormal basis from the normal
+// 	vec3 B = N.cross3(vec3(1.0, 0, 0));
+// 	vec3 T = B.cross(N);
+
+// 	// GGX NDF sampling
+// 	float a2 = roughness * roughness;
+// 	float cosThetaH = sqrt(max(0.0f, (1.0-u1)/((a2-1.0)*u1+1) ));
+// 	float sinThetaH = sqrt(max(0.0f, 1.0f - cosThetaH * cosThetaH));
+// 	float phiH = u2 *PI * 2.0f;
+
+// 	// Get our GGX NDF sample (i.e., the half vector)
+// 	return T * (sinThetaH * cos(phiH)) +
+//            B * (sinThetaH * sin(phiH)) +
+//            N * cosThetaH;
+// }
 
 
 __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) {
     vec3 contribution(0.0f, 0.0f, 0.0f);
-    int n_bounces = 100;
+    int n_bounces = 30;
     vec3 coefficient = vec3(1.0f, 1.0f, 1.0f);
 
     for (int i = 0; i <= n_bounces; i++) {
-        // shoot a ray out into the world
+        
+        /* Get Nearest Intersection Point of Ray*/
         IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
         
-        // if the ray missed, we are done
+        /* Return if ray missed - add environmental light? */
         if (!min_p.intersects){
             break;
         }
 
         Material material = min_p.material;
         
-        // do absorption if we are hitting from inside the object
+        /* Attenuation of light - Beer's Law? Not sure how physically accurate this is */
         if (i > 0 && min_p.inside) {
             vec3 attenuation = -1 * min_p.material.refractionColor * min_p.distance;
             coefficient = coefficient.cwiseProduct(vec3(exp(attenuation[0]), exp(attenuation[1]), exp(attenuation[2])));
         }
         
-        // get the pre-fresnel chances
-        float specularChance = material.specularChance;
-        float refractionChance = material.refractionChance;
+        /* Reflectivity */
+        float f0 = material.f0;
         
-        // take fresnel into account for specularChance and adjust other chances.
-        // specular takes priority.
-        // chanceMultiplier makes sure we keep diffuse / refraction ratio the same.
-        float rayProbability = 1.0f;
-        if (specularChance > 0.0f)
-        {
-            specularChance = FresnelReflectAmount(
-            	min_p.inside ? material.IOR : 1.0,
-            	!min_p.inside ? material.IOR : 1.0,
-            	r.direction(), min_p.normal, min_p.material.specularChance, 1.0f);
-            
-            float chanceMultiplier = (1.0f - specularChance) / (1.0f - min_p.material.specularChance);
-            refractionChance *= chanceMultiplier;
-        }
-        
-        // calculate whether we are going to do a diffuse, specular, or refractive ray
-        float doSpecular = 0.0f;
-        float doRefraction = 0.0f;
-        float raySelectRoll = curand_uniform(s);
-		if (specularChance > 0.0f && raySelectRoll < specularChance)
-        {
-            doSpecular = 1.0f;
-            rayProbability = specularChance;
-        }
-        else if (refractionChance > 0.0f && raySelectRoll < specularChance + refractionChance)
-        {
-            doRefraction = 1.0f;
-            rayProbability = refractionChance;
-        }
-        else
-        {
-            rayProbability = 1.0f - (specularChance + refractionChance);
-        }
+        /* Refractivity */
+        float transparency = material.transparency;
 
-        // if (doRefraction != 1.0f) {
-        //     printf("yes\n");
-        // }
-        
-        // numerical problems can cause rayProbability to become small enough to cause a divide by zero.
-		rayProbability = max(rayProbability, 0.001f);
+        float p_specular = f0;
+        float p_refract = transparency;
 
+        if (f0 > 0.0f)
+        {
+            p_specular = getFresnelRatio(r.direction(), min_p.normal, f0, 1.0f, min_p.inside ? material.IOR : 1.0, !min_p.inside ? material.IOR : 1.0);
+            p_refract = transparency * (1.0f - p_specular) / (1.0f - f0);
+        }
+        
+        /* Determine whether we do specular reflection, diffuse reflection or refraction*/
+        int mode = 0;
+        float u = curand_uniform(s);
+        float p_ray;
+
+		if (p_specular > 0.0f && u < p_specular) {
+            mode = 1;
+            p_ray = p_specular;
+            //H = getGGXMicrofacet(curand_uniform(s), curand_uniform(s), material.specularRoughness, min_p.normal);
+        } else if (p_refract > 0.0f && u < p_specular + p_refract) {
+            mode = 2;
+            p_ray = p_refract;
+        } else {
+            mode = 3;
+            p_ray = 1.0f - (p_specular + p_refract);
+        }
+        
+        /* Avoid numerical division by zero errors */
+		p_ray = max(p_ray, 0.001f);
+
+        /* Origin of new ray */
         vec3 newPosition = min_p.position;
-        // Calculate a new ray direction.
-        // Diffuse uses a normal oriented cosine weighted hemisphere sample.
-        // Perfectly smooth specular uses the reflection ray.
-        // Rough (glossy) specular lerps from the smooth specular to the rough diffuse by the material roughness squared
-        // Squaring the roughness is just a convention to make roughness feel more linear perceptually.
+        
+        /* Diffuse Ray Direction - Cosine weighted random direction in hemisphere */
         vec3 diffuseRayDir = (min_p.normal + sampleHemisphere(curand_uniform(s), curand_uniform(s))).normalized();
         
+        /* Specular Ray Direction - Perfect reflection */
         vec3 specularRayDir = reflect(r.direction(), min_p.normal).normalized();
+
+        /* Account for roughness of specular material */
         specularRayDir = (lerp_vec(specularRayDir, diffuseRayDir, material.specularRoughness*material.specularRoughness)).normalized();
 
+        /* Refraction Ray Direction - according to Snell's Law */
         vec3 refractionRayDir = refract(r.direction(), min_p.normal, min_p.inside ? min_p.material.IOR : 1.0f / min_p.material.IOR).normalized();
         
         refractionRayDir = (lerp_vec(refractionRayDir, (min_p.normal + sampleHemisphere(curand_uniform(s), curand_uniform(s))).normalized(), material.refractionRoughness*material.refractionRoughness).normalized());
         
-        vec3 newDirection = lerp_vec(diffuseRayDir, specularRayDir, doSpecular).normalized();
-        newDirection = lerp_vec(newDirection, refractionRayDir, doRefraction).normalized();
+        vec3 newDirection = (mode == 1) ? specularRayDir : (mode == 2) ? refractionRayDir : diffuseRayDir;
         
 		// add in emissive lighting
         if (material.emissive.norm() > 0){
             contribution = contribution + material.emissive.cwiseProduct(coefficient);
         }
         
-        // update the colorMultiplier. refraction doesn't alter the color until we hit the next thing, so we can do light absorption over distance.
-        if (doRefraction == 0.0f)
-            coefficient = coefficient.cwiseProduct(lerp_vec(material.albedo, material.specularColor, doSpecular));
+        /* Add colour to coefficient */
+        coefficient = mode == 2 ? coefficient : coefficient.cwiseProduct(mode == 1 ? material.specularColor : material.albedo);
         
-        // since we chose randomly between diffuse, specular, refract,
-        // we need to account for the times we didn't do one or the other.
-        coefficient = coefficient / rayProbability;
+        coefficient = coefficient / p_ray;
         
-        // Russian Roulette
-        // As the throughput gets smaller, the ray is more likely to get terminated early.
-        // Survivors have their value boosted to make up for fewer samples being in the average.
-        float p = max(coefficient.x(), max(coefficient.y(), coefficient.z()));
-        if (curand_uniform(s) > p)
+        /* Russian Roulette */
+        float q = max(coefficient.x(), max(coefficient.y(), coefficient.z()));
+        if (curand_uniform(s) > q)
             break;
 
-        // Add the energy we 'lose' by randomly terminating paths
-        coefficient = coefficient * 1.0f / p;    
+        coefficient = coefficient * 1.0f / q;    
         r = ray(newPosition, newDirection); 
     }
     return contribution;
@@ -322,11 +288,9 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects, 
     vec3 viewport_upper_left = camera_pos - vec3(0, 0, focal_length) - viewport_u/2.0 - viewport_v/2.0;
     vec3 pixel00_loc = viewport_upper_left + (pixel_delta_u + pixel_delta_v) * 0.5;
 
-    //uint32_t rngState = ((uint32_t)(i) * (uint32_t)(1973) + (uint32_t)(j) * (uint32_t) (9277) ) | uint(1);
-
 
     color3 ambient(0.3, 0.3, 0.3);
-    int n_samples = 2000;
+    int n_samples = 100;
     color3 p_color(0, 0, 0);
     color3 rayColor(1, 1, 1);
     color3 incomingLight(0, 0, 0);
@@ -395,11 +359,11 @@ __global__ void constructScene(Shape **scene) {
         Material base;
         base.albedo = vec3(0.9f, 0.25f, 0.25f);
         base.emissive = vec3(0.0f, 0.0f, 0.0f);        
-        base.specularChance = 0.0f;
+        base.f0 = 0.0f;
         base.specularRoughness = 0.0f;
         base.specularColor = vec3(1.0f, 1.0f, 1.0f) * 0.8f;
         base.IOR = 1.1f;
-        base.refractionChance = 0.0f;
+        base.transparency = 0.0f;
 
         Material blue_wall = base;
         blue_wall.IOR = 1.0f;
@@ -414,17 +378,17 @@ __global__ void constructScene(Shape **scene) {
         Material glass;
         glass.albedo = vec3(0.9f, 0.25f, 0.25f);
         glass.emissive = vec3(0.0f, 0.0f, 0.0f);        
-        glass.specularChance = 0.02f;
+        glass.f0 = 0.02f;
         glass.specularRoughness = 0;
         glass.specularColor = vec3(1.0f, 1.0f, 1.0f) * 0.8f;
         glass.IOR = 1.1f;
-        glass.refractionChance = 1.0f;
+        glass.transparency = 1.0f;
         glass.refractionRoughness = 0;
         glass.refractionColor = vec3(0.0f, 0.5f, 1.0f);
 
         floor.albedo = vec3(0.4, 0.01, 0.3);
 
-        metallic_ball.specularChance = 0.3;
+        metallic_ball.f0 = 0.3;
 
         blue_wall.albedo = vec3(0, 0, 0.4f);
         white_wall.albedo = vec3(0.2f, 0.2f, 0.2f);
