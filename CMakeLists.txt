@@ -5,5 +5,9 @@ find_package(Eigen3 REQUIRED)
 
 
 
-add_executable (pathtracer main.cu)
+add_executable (pathtracer
+                main.cu)
+
+add_compile_options(--expt-relaxed-constexpr)
+
 target_link_libraries (pathtracer Eigen3::Eigen)

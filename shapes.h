@@ -1,66 +1,11 @@
-#include "vec3.h"
+#pragma once
+
+#include "vec_math.h"
 #include "ray.h"
-#include "color.h"
-#include <Eigen/Core>
 #include <Eigen/LU>
 #include <Eigen/Geometry>
 #include <cmath>
-
-typedef Eigen::Matrix<float, 4, 4> Matrix4;
-
-#define IDENTITY Eigen::Affine3f::Identity()
-
-#define PI 3.14159265358979323846
-#define DEG_TO_RAD(X) (X*PI)/180
-#define SMALL_NUMBER 0.00001
-
-class Shape;
-
-class Material {
-    public:
-        __device__ Material() {}
-
-        /* Diffuse colour of surface */
-        vec3 albedo = vec3(0.0f, 0.0f, 0.0f);
-        
-        /* Emissitivity of the surface */
-        vec3 emissive = vec3(0.0f, 0.0f, 0.0f);
-        
-        /* Base Reflectivity of Material when viewed at normal */
-        float f0 = 0.0f;
-
-        /* Roughness of Specular Reflections */
-        float specularRoughness = 0.0f;
-
-        /* Colour of Specular Reflections */
-        vec3  specularColor = vec3(0.0f, 0.0f, 0.0f);
-
-        /* Index of Refraction */
-        float IOR = 1.0f;
-
-        /* Probability of refraction */
-        float transparency = 0.0f;
-
-        /* Roughness of refraction */
-        float refractionRoughness = 0.0f;
-
-        /* Attenuation of light - colour absorbed by material */
-        vec3 refractionColor = vec3(0.0f, 0.0f, 0.0f);  
-
-};
-
-__device__ inline float GeometryShadowing(vec3 X, vec3 N, float k) {
-    return N.dot(X)/(N.dot(X) * (1 - k) + k);
-}
-
-__device__ vec3 refract(vec3 I, vec3 N, float eta)
-{
-    float k = 1.0 - eta * eta * (1.0 - (N.dot(I)) * (N.dot(I)));
-    if (k < 0.0){
-        return vec3(0, 0, 0); }
-    else{
-        return eta * I - (eta * (N.dot(I)) + sqrt(k)) * N;}
-}
+#include "materials.h"
 
 struct IntersectionPoint {
         bool intersects = false;
@@ -71,22 +16,13 @@ struct IntersectionPoint {
         bool inside;
 };
 
+/* With the exception of the Plane, every shape has two intersections with a ray (if it intersects at all) */
 struct RayPath {
     int n_intersections;
     IntersectionPoint first;
     IntersectionPoint second;
 };
 
-class LightSource {
-    public:
-        __device__ LightSource(vec3 position, color3 emission_color = color3(1, 1, 1), float emission_intensity = 1)
-            : position(position), emission_color(emission_color), emission_intensity(emission_intensity) {}
-        vec3 position;
-        color3 emission_color;
-        float emission_intensity;
-
-        __device__ float getIntensity(float t) {return this->emission_intensity / ((4*atan(1.0)) * 4 * pow(t, 2));}
-};
 
 class Shape {
     protected:
@@ -103,12 +39,21 @@ class Shape {
         __device__ ray transformRay(ray& r) {
             return ray(transformPointLocal(r.origin()), transformVectorLocal(r.direction()));
         }
+        
         __device__ vec3 transformPointLocal(vec3 v) {return this->transform_inv * v;}
+        
         __device__ vec3 transformVectorLocal(vec3 v) {return this->transform_inv.linear() * v;}
+        
         __device__ vec3 transformPointWorld(vec3 v) {return this->transform * v;}
+        
         __device__ vec3 transformVectorWorld(vec3 v) {return this->transform.linear() * v;}
+        
+        /* Because of a bug with Eigen and CUDA - transposing vectors isn't possible 
+         *  For now we don't scale any objects - will fix or find workaround later  */
         __device__ vec3 transformNormalWorld(vec3 n) {return this->transform.linear() * n;}
+        
         __device__ virtual RayPath getRayPath(ray& r) = 0;
+        
         __device__ RayPath getIntersections(ray& r) {
             RayPath res = getRayPath(transformRay(r));
             if (res.n_intersections == 1 && res.first.distance <= SMALL_NUMBER) {
@@ -126,6 +71,30 @@ class Shape {
             return res;
         }
 };
+
+
+__device__ IntersectionPoint getNearestIntersection(ray& r, Shape** scene, int n_objects) {
+    IntersectionPoint min_p;
+    min_p.intersects = false;
+    for (int k = 0; k < n_objects; k++) {
+        Shape *obj = scene[k];
+        RayPath p = obj->getIntersections(r);
+        IntersectionPoint point;
+        if (p.n_intersections == 1) {
+            point = p.first;
+        } else if (p.n_intersections == 2) {
+            point = (p.second.distance < p.first.distance) ? p.second : p.first;
+        } else {
+            point.intersects = false;
+        }
+        if (point.intersects && (!min_p.intersects || point.distance < min_p.distance)) {
+            min_p = point;
+            min_p.inside = min_p.normal.dot(r.direction()) > 0;
+            if (min_p.inside) {min_p.normal = -1 * min_p.normal;}
+        }
+    }
+    return min_p;
+}
 
 /* Plane on origin with normal (0, 0, 1) */
 class Plane : public Shape {
@@ -185,10 +154,6 @@ class Cube : public Shape {
         }
 
         __device__ vec3 getNormal(vec3 position) {
-            // vec3 vMax = vec3(this->xMax, this->yMax, this->zMax);
-            // vec3 vMin = vec3(this->xMin, this->yMin, this->zMin);
-            // vec3 center = (vMax + vMin) * (0.5f);
-            // vec3 res = position - center;
             float t = max(abs(position.x()), max(abs(position.y()), abs(position.z())));
             vec3 res;
             if (abs(position.x()) == t) {
@@ -198,22 +163,20 @@ class Cube : public Shape {
             } else {
                 res = vec3(0, 0, position.z());
             }
-            // printf("Position: %2.3f %2.3f %2.3f, Norm: %2.3f %2.3f %2.3f\n", position[0], position[1], position[2], res.normalized()[0], res.normalized()[1], res.normalized()[2]);
             return res.normalized();
         }
 
         __device__ RayPath getRayPath(ray& r) {
-            float dirfrac_x = 1.0f / r.direction().x();
-            float dirfrac_y = 1.0f / r.direction().y();
-            float dirfrac_z = 1.0f / r.direction().z();
-            // lb is the corner of AABB with minimal coordinates - left bottom, rt is maximal corner
-            // r.org is origin of ray
-            float t1 = (xMin - r.origin().x())*dirfrac_x;
-            float t2 = (xMax - r.origin().x())*dirfrac_x;
-            float t3 = (yMin - r.origin().y())*dirfrac_y;
-            float t4 = (yMax - r.origin().y())*dirfrac_y;
-            float t5 = (zMin - r.origin().z())*dirfrac_z;
-            float t6 = (zMax - r.origin().z())*dirfrac_z;
+            float x = 1.0f / r.direction().x();
+            float y = 1.0f / r.direction().y();
+            float z = 1.0f / r.direction().z();
+
+            float t1 = (xMin - r.origin().x())*x;
+            float t2 = (xMax - r.origin().x())*x;
+            float t3 = (yMin - r.origin().y())*y;
+            float t4 = (yMax - r.origin().y())*y;
+            float t5 = (zMin - r.origin().z())*z;
+            float t6 = (zMax - r.origin().z())*z;
 
             float tmin = max(max(min(t1, t2), min(t3, t4)), min(t5, t6));
             float tmax = min(min(max(t1, t2), max(t3, t4)), max(t5, t6));
@@ -221,7 +184,7 @@ class Cube : public Shape {
             RayPath res;
             res.n_intersections = 0;
 
-            // if tmax < 0, ray (line) is intersecting AABB, but the whole AABB is behind us
+            /* Cube is behind the origin entirely */
             float t;
             if (tmax < 0)
             {
@@ -229,7 +192,7 @@ class Cube : public Shape {
                 return res;
             }
 
-            // if tmin > tmax, ray doesn't intersect AABB
+            /* Ray doesn't intersect Cube */
             if (tmin > tmax)
             {
                 t = tmax;
@@ -403,63 +366,6 @@ class Sphere : public Shape {
                 res.second.distance = d;
                 res.second.normal = (this->transformPointWorld(pos) - wOrigin).normalized();
             }
-            // printf("A: %9.6f B: %9.6f C: %0.6f\n", a, b, c);
-            //printf("Sphere LocalDirection: %9.6f %9.6f %9.6f\n",localRay.direction()[0],localRay.direction()[1],localRay.direction()[2]);
-            //printf("LocalOrigin: %9.6f %9.6f %9.6f\n",localRay.origin()[0],localRay.origin()[1],localRay.origin()[2]);
-            // printf("Discriminant: %9.6f\n", discriminant);
             return res;
         }
 };
-
-
-// class Triangle {
-//     vec3 v0;
-//     vec3 v1;
-//     vec3 v2;
-//     Material material;
-
-//     public:
-//         __device__ Triangle(Material material, vec3 v0, vec3 v1, vec3 v2) : v0(v0), v1(v1), v2(v2), material(material) {}
-//         __device__ IntersectionPoint getIntersection(ray& r) {
-//             IntersectionPoint res;
-//             res.intersects = false;
-//             const float EPSILON = 0.0000001;
-//             vec3 edge1, edge2, rayVecXe2, s, sXe1;
-//             float det, invDet, u, v;
-//             edge1 = v1 - v0;
-//             edge2 = v2 - v0;
-//             rayVecXe2 = r.direction().cross(edge2);
-//             det = edge1.dot(rayVecXe2);
-
-//             if (det > -EPSILON && det < EPSILON)
-//                 return res;    // This ray is parallel to this triangle.
-
-//             invDet = 1.0 / det;
-//             s = r.origin() - v0;
-//             u = invDet * s.dot(rayVecXe2);
-
-//             if (u < 0.0 || u > 1.0)
-//                 return res;
-
-//             sXe1 = s.cross(edge1);
-//             v = invDet * r.direction().dot(sXe1);
-
-//             if (v < 0.0 || u + v > 1.0)
-//                 return res;
-
-//             // At this stage we can compute t to find out where the intersection point is on the line.
-//             float t = invDet * edge2.dot(sXe1);
-
-//             if (t > EPSILON) // ray intersection
-//             {
-//                 res.intersects = true;
-//                 res.distance = t;
-//                 res.position = r.at(t);
-//                 res.material = material;
-//                 res.normal = edge1.cross(edge1);
-//                 return res;
-//             }
-//             else // This means that there is a line intersection but not a ray intersection.
-//                 return res;
-//         }
-// };
