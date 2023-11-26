@@ -30,9 +30,11 @@ class Shape {
         Eigen::Affine3f transform_linear;
         Eigen::Affine3f transform_inv;
         Eigen::Affine3f transform_inv_linear;
+        vec3 wOrigin;
         __device__ Shape(Eigen::Affine3f transform) {
             this->transform = transform;
             this->transform_inv = transform.inverse();
+            this->wOrigin = this->transform * vec3(0, 0, 0);
         }
     public:
         Material material;
@@ -109,7 +111,6 @@ class Plane : public Shape {
         float xMax = std::numeric_limits<float>::max(), float yMax = std::numeric_limits<float>::max()) : Shape(transform),
          xMin(xMin), yMin(yMin), xMax(xMax), yMax(yMax){this->material = material;}
         __device__ vec3 getPoint() {return vec3(0, 0, 0);}
-        __device__ vec3 getNormal(vec3 position) {return vec3(0, 0, 1);}
         __device__ Material getMaterial(vec3 position) {return this->material;}
         __device__ RayPath getRayPath(ray &r) {
             RayPath res;
@@ -122,7 +123,7 @@ class Plane : public Shape {
                     && this -> xMax > pos.x() && this -> yMax > pos.y()) {
                     res.first.distance = d;
                     res.first.intersects = true;
-                    res.first.normal =  transformNormalWorld(vec3(0, 0, 1).dot(r.direction()) > 0 ? vec3(0, 0, -1) : vec3(0, 0, 1));
+                    res.first.normal =  (transformPointWorld(vec3(0, 0, 1).dot(r.direction()) > 0 ? vec3(0, 0, -1) : vec3(0, 0, 1)) - wOrigin).normalized();
                     res.first.position = transformPointWorld(pos);
                     res.first.material = material;               
                 }
@@ -163,7 +164,7 @@ class Cube : public Shape {
             } else {
                 res = vec3(0, 0, position.z());
             }
-            return res.normalized();
+            return (transformPointWorld(res) - wOrigin).normalized();
         }
 
         __device__ RayPath getRayPath(ray& r) {
@@ -206,14 +207,14 @@ class Cube : public Shape {
             res.first.intersects = true;
             res.first.material = material;
             res.first.position = transformPointWorld(pos);
-            res.first.normal = transformNormalWorld(getNormal(pos));
+            res.first.normal = getNormal(pos);
 
             pos = r.at(tmax);
             res.second.distance = tmax;
             res.second.intersects = true;
             res.second.material = material;
             res.second.position = transformPointWorld(pos);
-            res.second.normal = transformNormalWorld(getNormal(pos));
+            res.second.normal = getNormal(pos);
             return res;
         }
 };
@@ -226,10 +227,6 @@ class Cylinder : public Shape {
     public:
         __device__ Cylinder(Material material, Eigen::Affine3f transform) : Shape(transform) {this->material = material;}
 
-        __device__ vec3 getNormal(vec3 position) {
-            return (position - vec3(0, 0, position.z())).normalized();
-        }
-
         __device__ IntersectionPoint getIntersectionDisc(ray& r, vec3 disc_normal) {
 
             IntersectionPoint res;
@@ -238,8 +235,6 @@ class Cylinder : public Shape {
 
             if (r.direction().dot(disc_normal) == 0)
                 return res;
-
-
 
             float t;
 
@@ -253,7 +248,7 @@ class Cylinder : public Shape {
             res.intersects = true;
             res.position = transformPointWorld(pos);
             res.material = material;
-            res.normal = transformNormalWorld(disc_normal);
+            res.normal = (transformPointWorld(disc_normal) - wOrigin).normalized();
             res.distance = t;
             return res;
         }
@@ -280,7 +275,7 @@ class Cylinder : public Shape {
                 cylinder1.position = transformPointWorld(pos);
                 cylinder1.material = material;
                 cylinder1.distance = d;
-                cylinder1.normal = transformNormalWorld(getNormal(pos));
+                cylinder1.normal = (transformPointWorld(vec3(pos[0], pos[1], 0)) - wOrigin).normalized();
 
                 d = (-b + sqrt(discriminant) ) / (2.0*a);
                 pos = r.at(d);
@@ -289,7 +284,7 @@ class Cylinder : public Shape {
                 cylinder2.position = transformPointWorld(pos);
                 cylinder2.material = material;
                 cylinder2.distance = d;
-                cylinder2.normal = transformNormalWorld(getNormal(pos));
+                cylinder2.normal = (transformPointWorld(vec3(pos[0], pos[1], 0)) - wOrigin).normalized();
             }
 
             
@@ -328,10 +323,6 @@ class Sphere : public Shape {
     public:
         __device__ Sphere(Material material, Eigen::Affine3f transform) : Shape(transform) {this->material = material;}
 
-        __device__ vec3 getNormal(vec3 position) {
-            return (position).normalized();
-        }
-
         __device__ RayPath getRayPath(ray& r) {
             float a = r.direction().dot(r.direction());
             float b = 2.0f*(r.direction().dot(r.origin()));
@@ -346,8 +337,6 @@ class Sphere : public Shape {
 
             float d;
             vec3 pos;
-
-            vec3 wOrigin = transformPointWorld(vec3(0, 0, 0));
 
             if (res.n_intersections == 2) {
                 d = (-b - sqrt(discriminant)) / (2.0*a);

@@ -51,14 +51,14 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         /* Get Nearest Intersection Point of Ray*/
         IntersectionPoint min_p = getNearestIntersection(r, scene, n_objects);
         
-        /* Return if ray missed - add environmental light? */
+        /* Return if ray missed */
         if (!min_p.intersects){
             break;
         }
 
         Material material = min_p.material;
         
-        /* Attenuation of light - Beer's Law? Not sure how physically accurate this is */
+        /* Attenuation of light - Beer's Law */
         if (i > 0 && min_p.inside) {
             vec3 attenuation = -1 * min_p.material.refractionColor * min_p.distance;
             coefficient = coefficient.cwiseProduct(vec3(exp(attenuation[0]), exp(attenuation[1]), exp(attenuation[2])));
@@ -70,16 +70,18 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         /* Refractivity */
         float transparency = material.transparency;
 
+        /* Base reflectivity of material */
         float p_specular = f0;
         float p_refract = transparency;
 
+        /* If base reflectivity is zero then just do diffuse reflection */
         if (f0 > 0.0f)
         {
             p_specular = getFresnelRatio(r.direction(), min_p.normal, f0, 1.0f, min_p.inside ? material.IOR : 1.0, !min_p.inside ? material.IOR : 1.0);
             p_refract = transparency * (1.0f - p_specular) / (1.0f - f0);
         }
         
-        /* Determine whether we do specular reflection, diffuse reflection or refraction*/        
+        /* Determine whether we do specular reflection, diffuse reflection or refraction */        
         int mode = 0;
         float u = curand_uniform(s);
         float p_ray;
