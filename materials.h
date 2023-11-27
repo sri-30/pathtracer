@@ -33,6 +33,7 @@ class Material {
         float refractionRoughness = 0.0f;
 
         /* Attenuation of light - colour absorbed by material */
-        vec3 refractionColor = vec3(0.0f, 0.0f, 0.0f);  
+        vec3 refractionColor = vec3(0.0f, 0.0f, 0.0f);
 
+        int bsdfType = 0;
 };

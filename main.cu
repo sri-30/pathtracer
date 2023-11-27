@@ -51,7 +51,7 @@ __global__ void render(vec3 *fb, config_t config, Shape** scene, int n_objects) 
     vec3 viewport_upper_left = camera_pos - vec3(0, 0, focal_length) - viewport_u/2.0 - viewport_v/2.0;
     vec3 pixel00_loc = viewport_upper_left + (pixel_delta_u + pixel_delta_v) * 0.5;
 
-    int n_samples = 4000;
+    int n_samples = 2000;
     vec3 p_color(0, 0, 0);
     vec3 totalLight(0, 0, 0);
     int n_origin;
@@ -115,25 +115,31 @@ __global__ void constructScene(Shape **scene) {
 
         Eigen::Affine3f t5 = IDENTITY;
         t5.translation() = Eigen::Translation3f(0.0, -0.5, -3.0).translation();
-        t5.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
-        t5.scale(0.5f);
+        //t5.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
+        t5.scale(0.4f);
 
         Eigen::Affine3f t6 = IDENTITY;
         t6.translation() = Eigen::Translation3f(0.6, -0.5, -3.0).translation();
-        t6.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
+        //t6.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
         t6.scale(0.4f);
 
         Eigen::Affine3f t7 = IDENTITY;
         t7.translation() = Eigen::Translation3f(-0.6, -0.5, -3.0).translation();
-        t7.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
+        //t7.linear() = Eigen::AngleAxisf(PI/4, vec3(0, 1, 0)).toRotationMatrix();
         t7.scale(0.4f);
+
+        Eigen::Affine3f t8 = IDENTITY;
+        t8.translation() = Eigen::Translation3f(0.0f, -0.5f, -4.2f).translation();
+        //t8.linear() = Eigen::AngleAxisf(PI/11, vec3(0, 1, 0)).toRotationMatrix();
+        t8.scale(vec3(2.5f, 0.3f, 0.5f));
+
 
 
         Material light_material;
         light_material.emissive = vec3(1.0f, 0.9f, 0.7f) * 20.0f;   
 
         Material base;
-        base.albedo = vec3(0.6f, 0.6f, 0.6f);
+        base.albedo = vec3(0.4f, 0.4f, 0.4f);
 
         Material green;
         green.albedo = vec3(0.0f, 1.0f, 0.0f);
@@ -141,13 +147,14 @@ __global__ void constructScene(Shape **scene) {
         Material red;
         red.albedo = vec3(1.0f, 0.0f, 0.0f);
 
-        Material glass;  
+        Material glass;
         glass.f0 = 0.02f;
         glass.specularRoughness = 0;
         glass.specularColor = vec3(1.0f, 1.0f, 1.0f) * 0.8f;
         glass.IOR = 1.5f;
         glass.transparency = 1.0f;
         glass.refractionRoughness = 0.0f;
+        glass.bsdfType = 1;
 
         Material metal;
         metal.albedo = vec3(1.0f, 1.0f, 1.0f);    
@@ -162,6 +169,19 @@ __global__ void constructScene(Shape **scene) {
         dielectric.specularRoughness = 0.2f;
         dielectric.specularColor = vec3(0.9f, 0.9f, 0.9f);
 
+        Material diffuse_pure;
+        diffuse_pure.albedo = vec3(0.6f, 0.6f, 0.6f);
+
+        Material glass1 = glass;
+        Material glass2 = glass;
+        Material glass3 = glass;
+
+        glass1.IOR = 1.5f;
+        glass2.IOR = 1.5f;
+        glass2.refractionColor = vec3(0.9f, 0.0f, 0.0f);
+        glass3.IOR = 1.5f;
+        glass3.refractionColor = vec3(2.0f, 0.0f, 0.0f);
+
         scene[0] = new Plane(base, floor, -15.0f, -15.0f, 15.0f, 15.0f);
         scene[1] = new Plane(red, left, -15.0f, -15.0f, 15.0f, 15.0f);
         scene[2] = new Plane(green, right, -15.0f, -15.0f, 15.0f, 15.0f);
@@ -169,13 +189,11 @@ __global__ void constructScene(Shape **scene) {
         scene[4] = new Plane(base, ceiling, -15.0f, -15.0f, 15.0f, 15.0f);
         scene[5] = new Plane(light_material, light, -0.5f, -0.5f, 0.5f, 0.5f);
         scene[6] = new Plane(base, tplane6, -15.0f, -15.0f, 15.0f, 15.0f);
-        scene[7] = new Sphere(dielectric, t5);
-        scene[8] = new Cube(dielectric, t6);
-        scene[9] = new Cylinder(dielectric, t7);
+        scene[7] = new Sphere(glass1, t7);
+        scene[8] = new Sphere(glass2, t5);
+        scene[9] = new Sphere(glass3, t6);
+        scene[10] = new Cube(diffuse_pure, t8);
 
-        //scene[8] = new Sphere(metal, t4);
-        //scene[9] = new Sphere(glass, t5);
-        //scene[8] = new Cube(glass, t5);
     }
 }
 
@@ -192,7 +210,7 @@ int main() {
     size_t fb_size = num_pixels*sizeof(vec3);
 
     /* Allocate space for Scene*/
-    int n_objs = 10;
+    int n_objs = 11;
     Shape **scene;
 
     checkCudaErrors(cudaMalloc((void **)&scene, n_objs*sizeof(void**)));

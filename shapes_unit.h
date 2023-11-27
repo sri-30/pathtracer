@@ -147,16 +147,16 @@ class Cube : public Shape {
         __device__ Cube(Material material, Eigen::Affine3f transform) : material(material), Shape(transform) {
             vec3 cornerLeft(-0.5, -0.5, -0.5);
             vec3 cornerRight(0.5, 0.5, 0.5);
-            this->xMin = min(cornerLeft.x(), cornerRight.x());
-            this->yMin = min(cornerLeft.y(), cornerRight.y());
-            this->zMin = min(cornerLeft.z(), cornerRight.z());
-            this->xMax = max(cornerLeft.x(), cornerRight.x());
-            this->yMax = max(cornerLeft.y(), cornerRight.y());
-            this->zMax = max(cornerLeft.z(), cornerRight.z());
+            this->xMin = std::min(cornerLeft.x(), cornerRight.x());
+            this->yMin = std::min(cornerLeft.y(), cornerRight.y());
+            this->zMin = std::min(cornerLeft.z(), cornerRight.z());
+            this->xMax = std::max(cornerLeft.x(), cornerRight.x());
+            this->yMax = std::max(cornerLeft.y(), cornerRight.y());
+            this->zMax = std::max(cornerLeft.z(), cornerRight.z());
         }
 
         __device__ vec3 getNormal(vec3 position) {
-            float t = max(abs(position.x()), max(abs(position.y()), abs(position.z())));
+            float t = std::max(abs(position.x()), std::max(abs(position.y()), abs(position.z())));
             vec3 res;
             if (abs(position.x()) == t) {
                 res = vec3(position.x(), 0, 0);
@@ -180,8 +180,8 @@ class Cube : public Shape {
             float t5 = (zMin - r.origin().z())*z;
             float t6 = (zMax - r.origin().z())*z;
 
-            float tmin = max(max(min(t1, t2), min(t3, t4)), min(t5, t6));
-            float tmax = min(min(max(t1, t2), max(t3, t4)), max(t5, t6));
+            float tmin = std::max(std::max(std::min(t1, t2), std::min(t3, t4)), std::min(t5, t6));
+            float tmax = std::min(std::min(std::max(t1, t2), std::max(t3, t4)), std::max(t5, t6));
 
             RayPath res;
             res.n_intersections = 0;

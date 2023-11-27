@@ -13,13 +13,13 @@ FetchContent_Declare(
 # For Windows: Prevent overriding the parent project's compiler/linker settings
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
+find_package(Eigen3 REQUIRED)
+
 
 enable_testing()
 
 add_executable(
   pathtracer_tests
-  vec3_test.cc
-  ray_test.cc
   shape_test.cc
 )
 
@@ -27,6 +27,7 @@ target_link_libraries(
   pathtracer_tests
   GTest::gtest_main
   GTest::gmock_main
+  Eigen3::Eigen
 )
 
 

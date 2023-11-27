@@ -1,12 +1,29 @@
 
-/* Uniformly Distributed Random Directions in Hemisphere */
-__device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
-    vec3 res(curand_normal(s), curand_normal(s), curand_normal(s));
-    res.normalize();
-    normal.normalize();
-    res = res.dot(normal) < 0 ? -1 * res : res;
-    return res.normalized();
+struct ONB {
+    vec3 x;
+    vec3 y;
+    vec3 z;
+};
+
+__device__ ONB constructONB(vec3 N) {
+    float sign = (N.z() < 0 ? -1.0f : 1.0f );
+    float a = -1 / (sign + N.z());
+    float b = N.x() * N.y() * a;
+    ONB res;
+    res.x = vec3(1 + sign * pow(N.x(), 2) * a, sign * b, -sign * N.x());
+    res.y = vec3(b, sign + pow(N.y(), 2) * a, -N.y());
+    res.z = N;
+    return res;
 }
+
+__device__ vec3 toLocalONB(ONB onb, vec3 v) {
+    return vec3(v.dot(onb.x), v.dot(onb.y), v.dot(onb.z));
+}
+
+__device__ vec3 inverseONB(ONB onb, vec3 v) {
+    return v.x() * onb.x + v.y() * onb.y + v.z() * onb.z;
+}
+
 
 /* Cosine-Weighted Distribution Sampling in Hemisphere */
 __device__ vec3 sampleHemisphere(float u1, float u2) {
@@ -16,6 +33,16 @@ __device__ vec3 sampleHemisphere(float u1, float u2) {
     float x = r * cosf(a);
     float y = r * sinf(a);
     return vec3(x, y, z);
+}
+
+
+/* Uniformly Distributed Random Directions in Hemisphere */
+__device__ vec3 randomDirectionHemisphere(vec3 normal, curandState *s) {
+    vec3 res(curand_normal(s), curand_normal(s), curand_normal(s));
+    res.normalize();
+    normal.normalize();
+    res = res.dot(normal) < 0 ? -1 * res : res;
+    return res.normalized();
 }
 
 __device__ float FresnelSchlick(float n1, float n2, float cosTheta) {
@@ -41,9 +68,11 @@ __device__ float getFresnelRatio(vec3 N, vec3 I, float f0, float f90, float n1, 
         return lerp(f0, f90, fresnel_res);
 }
 
+
+
 __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) {
     vec3 contribution(0.0f, 0.0f, 0.0f);
-    int n_bounces = 30;
+    int n_bounces = 5;
     vec3 coefficient = vec3(1.0f, 1.0f, 1.0f);
 
     for (int i = 0; i <= n_bounces; i++) {
@@ -57,6 +86,10 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         }
 
         Material material = min_p.material;
+
+        if (material.emissive.norm() > 0){
+            contribution = contribution + material.emissive.cwiseProduct(coefficient);
+        }
         
         /* Attenuation of light - Beer's Law */
         if (i > 0 && min_p.inside) {
@@ -117,11 +150,6 @@ __device__ vec3 tracePath(Shape **scene, int n_objects, ray& r, curandState *s) 
         refractionRayDir = (lerp(refractionRayDir, (min_p.normal + sampleHemisphere(curand_uniform(s), curand_uniform(s))).normalized(), material.refractionRoughness*material.refractionRoughness).normalized());
         
         vec3 newDirection = (mode == 1) ? specularRayDir : (mode == 2) ? refractionRayDir : diffuseRayDir;
-        
-		// add in emissive lighting
-        if (material.emissive.norm() > 0){
-            contribution = contribution + material.emissive.cwiseProduct(coefficient);
-        }
         
         /* Add colour to coefficient */
         coefficient = mode == 2 ? coefficient : coefficient.cwiseProduct(mode == 1 ? material.specularColor : material.albedo);
